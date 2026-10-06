@@ -9,9 +9,10 @@ below is the one actually used to produce the released image.
 * A POSIX shell, `repo` (Google's repo tool) on `PATH`, `git`, `python3`.
 * **JDK 11** — set `JAVA_HOME` explicitly, e.g.
   `export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64`.
-* Disk for a full TWRP/AOSP tree plus `out/` (the usual multi-hundred-GB
-  budget; the reference build ran on a workspace with room for ~7.7 GB of
-  dumps plus the tree — size your disk for the manifest, not the dump).
+* Disk for a full TWRP/AOSP tree plus `out/`: the reference workspace
+  measured **~44 GB** total (`.repo` 8 GB + checked-out sources 25 GB +
+  `out/` 11 GB) — keep ≥ 60 GB free. (The dump itself is separate: the
+  extract step only needs its `recovery.bin`.)
 * The device's **stock firmware dump** — specifically `recovery.bin`, the
   raw read of the stock recovery partition. On this project that dump is a
   full per-partition raw read of the device; for *this* build step only
