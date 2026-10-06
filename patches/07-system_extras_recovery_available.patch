@@ -1,0 +1,14 @@
+diff --git a/f2fs_utils/Android.bp b/f2fs_utils/Android.bp
+index dc74d6d..05994c9 100644
+--- a/f2fs_utils/Android.bp
++++ b/f2fs_utils/Android.bp
+@@ -19,6 +19,9 @@ license {
+ 
+ cc_library_shared {
+     name: "libf2fs_sparseblock",
++    // Listed by bootable/recovery/prebuilt/Android.mk:173 for RECOVERY_LIBRARY_SOURCE_FILES
++    // when TW_INCLUDE_CRYPTO := true.
++    recovery_available: true,
+     cflags: ["-Werror"],
+ 
+     srcs: ["f2fs_sparseblock.c"],

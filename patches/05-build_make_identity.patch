@@ -1,0 +1,38 @@
+diff --git a/core/version_defaults.mk b/core/version_defaults.mk
+index b6857d1..d621b53 100644
+--- a/core/version_defaults.mk
++++ b/core/version_defaults.mk
+@@ -88,7 +88,17 @@ MAX_PLATFORM_VERSION :=
+ # The last stable version name of the platform that was released.  During
+ # development, this stays at that previous version, while the codename indicates
+ # further work based on the previous version.
+-PLATFORM_VERSION_LAST_STABLE := 12
++#
++# Set to 11, not this tree's 12: the value is emitted verbatim as
++# ro.build.version.release (build/make/tools/buildinfo.sh:19), and the stock
++# Trustonic keymaster glue (libMcTeeKeymaster.so) reads that property to derive
++# Tag::OS_VERSION.  hardware/interfaces/keymaster/4.0/types.hal:556-561 requires
++# begin() to return ErrorCode::KEY_REQUIRES_UPGRADE whenever a key's
++# Tag::OS_VERSION differs from the running one.  /data/unencrypted/key was
++# created by stock, whose dump/system.bin /system/build.prop says
++# ro.build.version.release=11, so reporting 12 is what made FBE DE
++# decryption fail.  Provenance: debugfs -R "cat /system/build.prop" dump/system.bin.
++PLATFORM_VERSION_LAST_STABLE := 11
+ 
+ # These are the current development codenames, if the build is not a final
+ # release build.  If this is a final release build, it is simply "REL".
+@@ -238,7 +248,13 @@ ifndef PLATFORM_SECURITY_PATCH
+     #  It must be of the form "YYYY-MM-DD" on production devices.
+     #  It must match one of the Android Security Patch Level strings of the Public Security Bulletins.
+     #  If there is no $PLATFORM_SECURITY_PATCH set, keep it empty.
+-    PLATFORM_SECURITY_PATCH := 2022-04-05
++    #
++    #  2022-06-05, not this tree's 2022-04-05: buildinfo.sh:21 emits this as
++    #  ro.build.version.security_patch, which libMcTeeKeymaster.so reads to
++    #  derive Tag::OS_PATCHLEVEL.  types.hal:579-585 mandates that a mismatch
++    #  make begin() return KEY_REQUIRES_UPGRADE.  Stock's value is 2022-06-05
++    #  (debugfs -R "cat /system/build.prop" dump/system.bin).
++    PLATFORM_SECURITY_PATCH := 2022-06-05
+ endif
+ 
+ ifndef PLATFORM_SECURITY_PATCH_TIMESTAMP

@@ -1,0 +1,639 @@
+diff --git a/Decrypt.cpp b/Decrypt.cpp
+index d9f034b..0537ad2 100755
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -182,19 +182,135 @@ extern "C" bool lookup_ref_tar(fscrypt_policy *fep, uint8_t* policy) {
+ 	return true;
+ }
+ 
+-extern "C" bool Decrypt_DE() {
+-	printf("Attempting to initialize DE keys\n");
+-	if (!fscrypt_initialize_systemwide_keys()) { // this deals with the overarching device encryption
+-		printf("fscrypt_initialize_systemwide_keys returned fail\n");
++// BUILD 22: expose the legacy keystore 1.0 files to keystore2's legacy migrator.
++//
++// Stock Android on this device runs the legacy keystore 1.0 daemon, which
++// stores keys only as files under /data/misc/keystore/user_0/ and never
++// creates /data/misc/keystore/persistent.sqlite. The recovery starts
++// keystore2 pointed at the scratch directory /tmp/misc/keystore
++// (bootable/recovery/etc/init/keystore2.rc:30), so its LegacyBlobLoader sees
++// an empty store and get_key_entry() answers KEY_NOT_FOUND for the synthetic
++// password key (domain SELINUX, namespace 103) - the "key not found" that
++// stopped user-0 CE decryption.
++//
++// Fix, two halves:
++//   a. legacy_migrator.rs is patched with a LOCKSETTINGS_NAMESPACE (103) ->
++//      AID_SYSTEM (1000) arm so the migrator will load that key instead of
++//      refusing the namespace.
++//   b. this copy makes the legacy files visible to it. The source is only
++//      ever read; remove_keystore_entry() inside check_and_migrate() then
++//      deletes only the /tmp copies, so a stock boot still finds its
++//      original files, and the sqlite the migration writes stays in volatile
++//      /tmp.
++//
++// Must run before the first keystore2 get_key_entry(): the migrator caches
++// STATE_EMPTY permanently once it finds an empty store
++// (legacy_migrator.rs:139-141). Both call sites below are on that path.
++static int copy_legacy_store_entries(const char* src, const char* dst) {
++	DIR* dir = opendir(src);
++	if (!dir)
++		return -1;
++	int copied = 0;
++	struct dirent* ent;
++	while ((ent = readdir(dir)) != NULL) {
++		if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
++			continue;
++		// The scratch sqlite belongs to the running keystore2; never touch it.
++		if (!strncmp(ent->d_name, "persistent.sqlite", 17))
++			continue;
++		std::string sp = std::string(src) + "/" + ent->d_name;
++		std::string dp = std::string(dst) + "/" + ent->d_name;
++		struct stat st;
++		if (lstat(sp.c_str(), &st) != 0)
++			continue;
++		if (S_ISDIR(st.st_mode)) {
++			if (mkdir(dp.c_str(), 0700) != 0 && errno != EEXIST) {
++				printf("[sp] legacy store mkdir FAILED path=%s errno=%d\n", dp.c_str(), errno);
++				continue;
++			}
++			int sub = copy_legacy_store_entries(sp.c_str(), dp.c_str());
++			if (sub > 0)
++				copied += sub;
++		} else if (S_ISREG(st.st_mode)) {
++			std::string data;
++			if (!android::base::ReadFileToString(sp, &data)) {
++				printf("[sp] legacy store read FAILED path=%s errno=%d\n", sp.c_str(), errno);
++				continue;
++			}
++			if (!android::base::WriteStringToFile(data, dp, 0600)) {
++				printf("[sp] legacy store write FAILED path=%s errno=%d\n", dp.c_str(), errno);
++				continue;
++			}
++			copied++;
++		}
++	}
++	closedir(dir);
++	return copied;
++}
++
++// Called when the store should be visible. Retries until the source is
++// actually readable: on first boot activity /data's DE-protected names are
++// still ciphertext (that is exactly what FBE_DE_Names_Are_Plaintext() reports
++// before Decrypt_DE runs), so a copy attempt before the DE keys are installed
++// sees ENOENT. BUILD 23: only a walk that found user_0 (the keystore layout
++// marker) marks us done - a ciphertext readdir would produce garbage names
++// instead.
++static bool copy_legacy_keystore_store(void) {
++	static bool copied = false;
++	if (copied)
++		return true;
++	const char* src = "/data/misc/keystore";
++	const char* dst = "/tmp/misc/keystore";
++	struct stat st;
++	if (stat(src, &st) != 0) {
++		int e1 = errno;
++		int data_ok = (stat("/data", &st) == 0);
++		int misc_ok = (stat("/data/misc", &st) == 0);
++		printf("[sp] legacy store: %s absent errno=%d (stat /data=%d /data/misc=%d)\n",
++		       src, e1, data_ok, misc_ok);
++		fflush(stdout);
+ 		return false;
+ 	}
+-	if (!fscrypt_init_user0()) {
+-		printf("fscrypt_init_user0 returned fail\n");
++	if (mkdir(dst, 0700) != 0 && errno != EEXIST) {
++		printf("[sp] legacy store: mkdir %s FAILED errno=%d\n", dst, errno);
++		fflush(stdout);
+ 		return false;
+ 	}
++	int n = copy_legacy_store_entries(src, dst);
++	std::string marker = std::string(dst) + "/user_0";
++	DIR* d = opendir(marker.c_str());
++	if (d)
++		closedir(d);
++	printf("[sp] legacy store copied %d files from %s (user_0 marker=%d)\n",
++	       n, src, d ? 1 : 0);
++	fflush(stdout);
++	if (!d)
++		return false;
++	copied = true;
+ 	return true;
+ }
+ 
++extern "C" bool Decrypt_DE() {
++	printf("Attempting to initialize DE keys\n");
++	bool systemwide_ok = fscrypt_initialize_systemwide_keys();
++	if (!systemwide_ok)
++		printf("fscrypt_initialize_systemwide_keys returned fail\n");
++	// Run the per-user stage even when the systemwide stage failed: the failing
++	// part of that stage is the /data/per_boot key, which init regenerates on
++	// every Android boot anyway, while fscrypt_init_user0 installs the per-user
++	// DE key that protects /data/system_de/<user>/spblob. Skipping it makes the
++	// FBE credential path report "Unknown password type" for a correct PIN.
++	bool user0_ok = fscrypt_init_user0();
++	if (!user0_ok)
++		printf("fscrypt_init_user0 returned fail\n");
++	// BUILD 23: copy the legacy store only after both key stages - build 22's
++	// attempt before them hit ENOENT because DE-protected names were still
++	// ciphertext at that point.
++	copy_legacy_keystore_store();
++	fflush(stdout);
++	return systemwide_ok && user0_ok;
++}
++
+ // Crappy functions for debugging, please ignore unless you need to debug
+ // void output_hex(const std::string& in) {
+ // 	const char *buf = in.data();
+@@ -428,6 +544,26 @@ namespace keystore {
+ 		std::string keystore_path = "/tmp/misc/keystore/";
+ 		std::string dst = keystore_path + "persistent.sqlite";
+ 		std::string src = "/data/misc/keystore/persistent.sqlite";
++		struct stat st;
++		// BUILD 26: never touch the scratch DB unless there is a real source to
++		// seed it from. The old code opened dst unconditionally, and ofstream's
++		// default mode truncates - so with no source (this device runs the
++		// legacy keystore 1.0 daemon; see the BUILD 22 note above), every
++		// recovery start zeroed the live scratch DB. Harmless on a fresh boot
++		// (file absent, the migrator repopulates right after), but on a
++		// within-boot restart of recovery (init respawns it after a crash) it
++		// destroyed the rows the migrator had already written: get_key_entry
++		// then answered "key not found" (KEY_NOT_FOUND) and CE decrypt failed
++		// until the next full reboot. Also never overwrite a destination that
++		// already holds data - it is live and owned by keystore2.
++		if (stat(src.c_str(), &st) != 0) {
++			printf("[sp] no %s, leaving scratch db untouched\n", src.c_str());
++			return;
++		}
++		if (stat(dst.c_str(), &st) == 0 && st.st_size > 0) {
++			printf("[sp] scratch db already populated, not overwriting\n");
++			return;
++		}
+ 		std::ifstream srcif(src.c_str(), std::ios::binary);
+ 		std::ofstream dstof(dst.c_str(), std::ios::binary);
+ 		printf("copying '%s' to '%s'\n", src.c_str(), dst.c_str());
+@@ -501,6 +637,16 @@ namespace keystore {
+ 				.Authorization(::keymint::TAG_NONCE, iv_hidlvec)
+ 				.Authorization(::keymint::TAG_MAC_LENGTH, maclen);
+ 
++			// BUILD 22/23: make the legacy keystore-1.0 SP key visible to keystore2's
++			// migrator before the get_key_entry() below. Refuse the call when the
++			// copy is not ready: a KEY_NOT_FOUND there would let the migrator cache
++			// STATE_EMPTY for the rest of this boot (legacy_migrator.rs:139-141) and
++			// no later copy could recover the migration path.
++			if (!copy_legacy_keystore_store()) {
++				printf("[sp] legacy store NOT ready - refusing get_key_entry\n");
++				fflush(stdout);
++				return disk_decryption_secret_key;
++			}
+ 			ks2::KeyEntryResponse keyEntryResponse;
+ 			::ndk::SpAIBinder keystoreBinder(AServiceManager_checkService("android.system.keystore2.IKeystoreService/default"));
+ 			auto keystore = ks2::IKeystoreService::fromBinder(keystoreBinder);
+@@ -514,6 +660,11 @@ namespace keystore {
+ 				}
+ 				return disk_decryption_secret_key;
+ 			}
++			printf("[sp] getKeyEntry OK domain=%d nspace=%lld iSL=%d\n",
++					(int)keyEntryResponse.metadata.key.domain,
++					(long long)keyEntryResponse.metadata.key.nspace,
++					(int)(bool)keyEntryResponse.iSecurityLevel);
++			fflush(stdout);
+ 			std::variant<int, ks2::KeyEntryResponse> response = keyEntryResponse;
+ 			auto keyResponse = std::get<ks2::KeyEntryResponse>(response);
+ 			ks2::CreateOperationResponse encOperationResponse;
+@@ -521,7 +672,7 @@ namespace keystore {
+ 				keyResponse.metadata.key, begin_params.vector_data(), true,
+ 				&encOperationResponse);
+ 			if (!begin_rc.isOk()) {
+-				printf("Begin Operation failed\n");
++				printf("Begin Operation failed: %s\n", begin_rc.getDescription().c_str());
+ 				return disk_decryption_secret_key;
+ 			}
+ 			std::optional<std::vector<uint8_t>> optPlaintext;
+@@ -799,6 +950,12 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
+ 												ALOGE("error: could not connect to keystore service\n");
+ 											}
+ 											auto binder_result = service->addAuthToken(authToken);
++											// BUILD 22: attribute the auth token delivery that
++											// authorize_create() will need for the SP key.
++											printf("[sp] addAuthToken ok=%d desc=%s\n",
++													(int)binder_result.isOk(),
++													binder_result.getDescription().c_str());
++											fflush(stdout);
+ 										}
+ 									}
+ 								 );
+diff --git a/FsCrypt.cpp b/FsCrypt.cpp
+index 7505e56..3e2d400 100644
+--- a/FsCrypt.cpp
++++ b/FsCrypt.cpp
+@@ -453,16 +453,33 @@ bool fscrypt_initialize_systemwide_keys() {
+     LOG(INFO) << "fscrypt_initialize_systemwide_keys";
+ 
+     EncryptionOptions options;
+-    if (!get_data_file_encryption_options(&options)) return false;
++    bool step1 = get_data_file_encryption_options(&options);
++    if (step1) {
++        std::string step1_opts;
++        bool step1_str = OptionsToString(options, &step1_opts);
++        printf("[de] step1 get_data_file_encryption_options=OK str=%d opts=%s\n",
++               step1_str, step1_str ? step1_opts.c_str() : "(?)");
++    } else {
++        printf("[de] step1 get_data_file_encryption_options=FAIL\n");
++    }
++    fflush(stdout);
++    if (!step1) return false;
+ 
+     KeyBuffer device_key;
++    bool step2 = false;
++    bool step3 = false;
+ install:
+-    if (!retrieveOrGenerateKey(device_key_path, device_key_temp, kEmptyAuthentication,
+-                               makeGen(options), &device_key))
+-        return false;
++    step2 = retrieveOrGenerateKey(device_key_path, device_key_temp, kEmptyAuthentication,
++                                  makeGen(options), &device_key);
++    printf("[de] step2 retrieveOrGenerateKey=%d path=%s\n", (int)step2, device_key_path.c_str());
++    fflush(stdout);
++    if (!step2) return false;
+ 
+     EncryptionPolicy device_policy;
+-    if (!install_storage_key(DATA_MNT_POINT, options, device_key, &device_policy)) {
++    step3 = install_storage_key(DATA_MNT_POINT, options, device_key, &device_policy);
++    printf("[de] step3 install_storage_key=%d\n", (int)step3);
++    fflush(stdout);
++    if (!step3) {
+         if (retry) {
+             printf("Trying %s wrappedkey\n", options.use_hw_wrapped_key ? "without" : "with");
+             GetEntryForMountPoint(&fstab_default, DATA_MNT_POINT)->fs_mgr_flags.wrapped_key =
+@@ -479,20 +496,45 @@ install:
+         return false;
+     }
+     std::string options_filename = std::string(DATA_MNT_POINT) + fscrypt_key_mode;
+-    if (!android::vold::writeStringToFile(options_string, options_filename)) return false;
++    if (!android::vold::writeStringToFile(options_string, options_filename)) {
++        printf("[de] write mode FAILED path=%s\n", options_filename.c_str());
++        fflush(stdout);
++        return false;
++    }
++    printf("[de] write mode OK path=%s\n", options_filename.c_str());
++    fflush(stdout);
+ 
+     std::string ref_filename = std::string(DATA_MNT_POINT) + fscrypt_key_ref;
+     de_key_raw_ref = device_policy.key_raw_ref;
+-    if (!android::vold::writeStringToFile(device_policy.key_raw_ref, ref_filename)) return false;
++    if (!android::vold::writeStringToFile(device_policy.key_raw_ref, ref_filename)) {
++        printf("[de] write ref FAILED path=%s\n", ref_filename.c_str());
++        fflush(stdout);
++        return false;
++    }
++    printf("[de] write ref OK ref_len=%zu\n", device_policy.key_raw_ref.size());
++    fflush(stdout);
+     LOG(INFO) << "Wrote system DE key reference to:" << ref_filename;
+ 
+     KeyBuffer per_boot_key;
+-    if (!generateStorageKey(makeGen(options), &per_boot_key)) return false;
++    if (!generateStorageKey(makeGen(options), &per_boot_key)) {
++        printf("[de] per_boot generateStorageKey FAILED\n");
++        fflush(stdout);
++        return false;
++    }
+     EncryptionPolicy per_boot_policy;
+-    if (!install_storage_key(DATA_MNT_POINT, options, per_boot_key, &per_boot_policy)) return false;
++    if (!install_storage_key(DATA_MNT_POINT, options, per_boot_key, &per_boot_policy)) {
++        printf("[de] per_boot install_storage_key FAILED\n");
++        fflush(stdout);
++        return false;
++    }
+     std::string per_boot_ref_filename = std::string("/data") + fscrypt_key_per_boot_ref;
+-    if (!android::vold::writeStringToFile(per_boot_policy.key_raw_ref, per_boot_ref_filename))
++    if (!android::vold::writeStringToFile(per_boot_policy.key_raw_ref, per_boot_ref_filename)) {
++        printf("[de] write per_boot_ref FAILED path=%s\n", per_boot_ref_filename.c_str());
++        fflush(stdout);
+         return false;
++    }
++    printf("[de] per_boot stage OK ref_len=%zu\n", per_boot_policy.key_raw_ref.size());
++    fflush(stdout);
+     LOG(INFO) << "Wrote per boot key reference to:" << per_boot_ref_filename;
+ 
+     return true;
+diff --git a/KeyStorage.cpp b/KeyStorage.cpp
+index 51fc4f6..4ad6fc4 100644
+--- a/KeyStorage.cpp
++++ b/KeyStorage.cpp
+@@ -364,13 +364,28 @@ static KeymasterOperation BeginKeymasterOp(Keymaster& keymaster, const std::stri
+     //     if (!readFileToString(upgraded_blob_file, &blob)) return KeymasterOperation();
+     // } else {
+         // DeleteUpgradedKey(keymaster, upgraded_blob_file);
+-    if (!readFileToString(blob_file, &blob)) return KeymasterOperation();
++    if (!readFileToString(blob_file, &blob)) {
++        printf("[de] BeginKeymasterOp: FAIL read blob %s\n", blob_file.c_str());
++        fflush(stdout);
++        return KeymasterOperation();
++    }
+     // }
++    printf("[de] BeginKeymasterOp: blob_len=%zu\n", blob.size());
++    fflush(stdout);
+     auto opHandle = keymaster.begin(blob, inParams, outParams);
++    printf("[de] BeginKeymasterOp: begin_ok=%d upgradedBlob_present=%d\n",
++           (int)(bool)opHandle, (int)(bool)opHandle.getUpgradedBlob());
++    fflush(stdout);
+     if (!opHandle) return opHandle;
+ 
+     // If key blob wasn't upgraded, nothing left to do.
+-    // if (!opHandle.getUpgradedBlob()) return opHandle;
++    // BUILD 25: restore this guard (it had been commented out). Without it a
++    // successful begin() with no upgrade blob falls through to
++    // `*opHandle.getUpgradedBlob()` below: operator* on a disengaged
++    // std::optional<std::string> (Keymaster.h:55) is undefined behavior.
++    // Live evidence: [de] BeginKeymasterOp begin_ok=1 upgradedBlob_present=0
++    // -> reaching writeStringToFile, five times per boot.
++    if (!opHandle.getUpgradedBlob()) return opHandle;
+ 
+     // if (already_upgraded) {
+     //     LOG(ERROR) << "Unexpected case; already-upgraded key " << upgraded_blob_file
+@@ -378,6 +393,9 @@ static KeymasterOperation BeginKeymasterOp(Keymaster& keymaster, const std::stri
+     //     return KeymasterOperation();
+     // }
+     LOG(INFO) << "Upgrading key: " << blob_file;
++    printf("[de] BeginKeymasterOp: reaching writeStringToFile (upgradedBlob=%d)\n",
++           (int)(bool)opHandle.getUpgradedBlob());
++    fflush(stdout);
+     
+     if (!writeStringToFile(*opHandle.getUpgradedBlob(), upgraded_blob_file))
+         return KeymasterOperation();
+@@ -609,26 +627,51 @@ bool storeKeyAtomically(const std::string& key_path, const std::string& tmp_path
+ 
+ bool retrieveKey(const std::string& dir, const KeyAuthentication& auth, KeyBuffer* key) {
+     LOG(INFO) << "Retrieving key from keymaster";
++    printf("[de] retrieveKey: enter dir=%s\n", dir.c_str());
++    fflush(stdout);
+     std::string version;
+-    if (!readFileToString(dir + "/" + kFn_version, &version)) return false;
++    if (!readFileToString(dir + "/" + kFn_version, &version)) {
++        printf("[de] retrieveKey: FAIL read version\n");
++        fflush(stdout);
++        return false;
++    }
+     if (version != kCurrentVersion) {
+         LOG(ERROR) << "Version mismatch, expected " << kCurrentVersion << " got " << version;
++        printf("[de] retrieveKey: FAIL version mismatch got='%s'\n", version.c_str());
++        fflush(stdout);
+         return false;
+     }
+     std::string secdiscardable_hash;
+-    if (!readSecdiscardable(dir + "/" + kFn_secdiscardable, &secdiscardable_hash)) return false;
++    if (!readSecdiscardable(dir + "/" + kFn_secdiscardable, &secdiscardable_hash)) {
++        printf("[de] retrieveKey: FAIL readSecdiscardable\n");
++        fflush(stdout);
++        return false;
++    }
+     std::string appId = generateAppId(auth, secdiscardable_hash);
+     std::string encryptedMessage;
+-    if (!readFileToString(dir + "/" + kFn_encrypted_key, &encryptedMessage)) return false;
++    if (!readFileToString(dir + "/" + kFn_encrypted_key, &encryptedMessage)) {
++        printf("[de] retrieveKey: FAIL read encrypted_key\n");
++        fflush(stdout);
++        return false;
++    }
++    printf("[de] retrieveKey: files ok usesKeymaster=%d enc_key_len=%zu\n",
++           (int)auth.usesKeymaster(), encryptedMessage.size());
++    fflush(stdout);
+     if (auth.usesKeymaster()) {
+         Keymaster keymaster;
++        printf("[de] retrieveKey: Keymaster ctor done securityLevel_ok=%d\n", (int)(bool)keymaster);
++        fflush(stdout);
+         if (!keymaster) return false;
+         km::AuthorizationSet keyParams = beginParams(appId);
+-        if (!decryptWithKeymasterKey(keymaster, dir, keyParams, encryptedMessage, key))
+-            return false;
++        bool decrypted = decryptWithKeymasterKey(keymaster, dir, keyParams, encryptedMessage, key);
++        printf("[de] retrieveKey: decryptWithKeymasterKey=%d\n", (int)decrypted);
++        fflush(stdout);
++        if (!decrypted) return false;
+     } else {
+         if (!decryptWithoutKeymaster(appId, encryptedMessage, key)) return false;
+     }
++    printf("[de] retrieveKey: OK key_len=%zu\n", key->size());
++    fflush(stdout);
+     return true;
+ }
+ 
+diff --git a/KeyUtil.cpp b/KeyUtil.cpp
+index 9273564..e859bd2 100644
+--- a/KeyUtil.cpp
++++ b/KeyUtil.cpp
+@@ -16,6 +16,7 @@
+ 
+ #include "KeyUtil.h"
+ 
++#include <cstdio>
+ #include <iomanip>
+ #include <sstream>
+ #include <string>
+@@ -149,9 +150,16 @@ static std::string buildLegacyKeyName(const std::string& prefix, const std::stri
+ static bool fscryptKeyring(key_serial_t* device_keyring) {
+     *device_keyring = keyctl_search(KEY_SPEC_SESSION_KEYRING, "keyring", "fscrypt", 0);
+     if (*device_keyring == -1) {
++        const int e = errno;
+         PLOG(ERROR) << "Unable to find device keyring";
++        // android-base LOG() never reaches /tmp/recovery.log in this recovery, so
++        // duplicate it on stdout, which is the proven channel (build 12/15).
++        printf("[de] fscryptKeyring: MISSING errno=%d\n", e);
++        fflush(stdout);
+         return false;
+     }
++    printf("[de] fscryptKeyring: found id=%d\n", (int)*device_keyring);
++    fflush(stdout);
+     return true;
+ }
+ 
+@@ -196,10 +204,15 @@ static bool installProvisioningKey(const KeyBuffer& key, const std::string& ref,
+     key_serial_t key_id = add_key("fscrypt-provisioning", ref.c_str(), (void*)&provisioning_key,
+                                   buf.size(), device_keyring);
+     if (key_id == -1) {
++        const int e = errno;
+         PLOG(ERROR) << "Failed to insert fscrypt-provisioning key for " << ref
+                     << " into session keyring";
++        printf("[de] installProvisioningKey: add_key FAILED errno=%d ref=%s\n", e, ref.c_str());
++        fflush(stdout);
+         return false;
+     }
++    printf("[de] installProvisioningKey: key_id=%d ref=%s\n", (int)key_id, ref.c_str());
++    fflush(stdout);
+     LOG(INFO) << "Added fscrypt-provisioning key for " << ref << " to session keyring";
+     return true;
+ }
+@@ -247,14 +260,33 @@ static bool installFsKeyringKey(const std::string& mountpoint, const EncryptionO
+ 
+     android::base::unique_fd fd(open(mountpoint.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+     if (fd == -1) {
++        const int e = errno;
+         PLOG(ERROR) << "Failed to open " << mountpoint << " to install key";
++        printf("[de] installFsKeyringKey: open(%s) FAILED errno=%d\n", mountpoint.c_str(), e);
++        fflush(stdout);
+         return false;
+     }
+ 
+     if (ioctl(fd, FS_IOC_ADD_ENCRYPTION_KEY, arg) != 0) {
++        const int e = errno;
+         PLOG(ERROR) << "Failed to install fscrypt key to " << mountpoint;
++        printf("[de] installFsKeyringKey: FS_IOC_ADD_ENCRYPTION_KEY FAILED errno=%d flags=%u "
++               "spectype=%u rawsize=%u\n",
++               e, (unsigned)arg->__flags, (unsigned)arg->key_spec.type,
++               (unsigned)arg->raw_size);
++        fflush(stdout);
+         return false;
+     }
++    {
++        std::string hex;
++        for (unsigned i = 0; i < FSCRYPT_KEY_DESCRIPTOR_SIZE && i < sizeof(arg->key_spec.u.descriptor); i++) {
++            char b[3];
++            snprintf(b, sizeof(b), "%02x", arg->key_spec.u.descriptor[i]);
++            hex += b;
++        }
++        printf("[de] installFsKeyringKey: ioctl OK desc=%s\n", hex.c_str());
++        fflush(stdout);
++    }
+ 
+     return true;
+ }
+@@ -262,6 +294,10 @@ static bool installFsKeyringKey(const std::string& mountpoint, const EncryptionO
+ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
+                 const KeyBuffer& key, EncryptionPolicy* policy) {
+     policy->options = options;
++    printf("[de] installKey: enter mount=%s ver=%d wrapped=%d keylen=%zu fskeyring=%d\n",
++           mountpoint.c_str(), (int)options.version, (int)options.use_hw_wrapped_key, key.size(),
++           (int)isFsKeyringSupported());
++    fflush(stdout);
+     // Put the fscrypt_add_key_arg in an automatically-zeroing buffer, since we
+     // have to copy the raw key into it.
+     KeyBuffer arg_buf(sizeof(struct fscrypt_add_key_arg) + key.size(), 0);
+@@ -281,10 +317,26 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
+             } else {
+                 policy->key_raw_ref = generateKeyRef((const uint8_t*)key.data(), key.size());
+             }
++            {
++                std::string hex;
++                for (unsigned char c : policy->key_raw_ref) {
++                    char b[3];
++                    snprintf(b, sizeof(b), "%02x", c);
++                    hex += b;
++                }
++                printf("[de] installKey: computed ref=%s (len=%zu, wrapped=%d)\n", hex.c_str(),
++                       policy->key_raw_ref.size(), (int)options.use_hw_wrapped_key);
++                fflush(stdout);
++            }
+             if (!isFsKeyringSupported()) {
++                printf("[de] installKey: taking LEGACY (session keyring) path\n");
++                fflush(stdout);
+                 return installKeyLegacy(key, policy->key_raw_ref);
+             }
+             if (!buildKeySpecifier(&arg->key_spec, *policy)) {
++                printf("[de] installKey: buildKeySpecifier FAILED reflen=%zu want=%d\n",
++                       policy->key_raw_ref.size(), FSCRYPT_KEY_DESCRIPTOR_SIZE);
++                fflush(stdout);
+                 return false;
+             }
+             break;
+@@ -304,7 +356,11 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
+     arg->raw_size = key.size();
+     memcpy(arg->raw, key.data(), key.size());
+ 
+-    if (!installFsKeyringKey(mountpoint, options, arg)) return false;
++    if (!installFsKeyringKey(mountpoint, options, arg)) {
++        printf("[de] installKey: installFsKeyringKey FAILED\n");
++        fflush(stdout);
++        return false;
++    }
+ 
+     if (arg->key_spec.type == FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER) {
+         // Retrieve the key identifier that the kernel computed.
+@@ -314,7 +370,13 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
+     std::string ref = keyrefstring(policy->key_raw_ref);
+     LOG(INFO) << "Installed fscrypt key with ref " << ref << " to " << mountpoint;
+ 
+-    if (!installProvisioningKey(key, ref, arg->key_spec)) return false;
++    if (!installProvisioningKey(key, ref, arg->key_spec)) {
++        printf("[de] installKey: installProvisioningKey FAILED ref=%s\n", ref.c_str());
++        fflush(stdout);
++        return false;
++    }
++    printf("[de] installKey: OK ref=%s\n", ref.c_str());
++    fflush(stdout);
+     return true;
+ }
+ 
+diff --git a/Keymaster.cpp b/Keymaster.cpp
+index 4781d91..642ffab 100644
+--- a/Keymaster.cpp
++++ b/Keymaster.cpp
+@@ -17,6 +17,8 @@
+ #include "Keymaster.h"
+ 
+ #include <android-base/logging.h>
++#include <stdio.h>
++#include <unistd.h>
+ 
+ #include <aidl/android/hardware/security/keymint/SecurityLevel.h>
+ #include <aidl/android/security/maintenance/IKeystoreMaintenance.h>
+@@ -55,6 +57,10 @@ static bool logKeystore2ExceptionIfPresent(::ndk::ScopedAStatus& rc, const std::
+     if (rc.isOk()) return false;
+ 
+     auto exception_code = rc.getExceptionCode();
++    printf("[de] ks2 %s FAILED exception=%d serviceSpecific=%d\n", func_name.c_str(),
++           (int)exception_code,
++           exception_code == EX_SERVICE_SPECIFIC ? rc.getServiceSpecificError() : 0);
++    fflush(stdout);
+     if (exception_code == EX_SERVICE_SPECIFIC) {
+         LOG(ERROR) << "keystore2 Keystore " << func_name
+                    << " returned service specific error: " << rc.getServiceSpecificError();
+@@ -104,11 +110,38 @@ bool KeymasterOperation::finish(std::string* output) {
+ }
+ 
+ Keymaster::Keymaster() {
+-    ::ndk::SpAIBinder binder(AServiceManager_waitForService(keystore2_service_name));
++    // AServiceManager_waitForService() blocks indefinitely: if keystore2 never
++    // registers, this thread parks in the binder wait forever and, because
++    // Decrypt_FBE_DE() runs before the recovery UI is created, TWRP hangs on
++    // the splash screen with recovery.log frozen at
++    // "Attempting to initialize DE keys".
++    //
++    // That is exactly what happened on this device: keystore2 crash-looped on a
++    // null device HAL manifest (see system/security/keystore2/src/vintf/
++    // vintf.cpp), so nothing ever satisfied the wait.
++    //
++    // keystore2 is started by init on "on late-init", strictly before the
++    // recovery service ("on boot" -> class_start default), and it is expected to
++    // register within milliseconds. Retry briefly for that case, then fail
++    // honestly through the existing !keystore2Service path so the caller can
++    // report the failure and recovery can still show its UI.
++    constexpr size_t kMaxAttempts = 50;  // 50 x 100 ms = 5 s ceiling
++    AIBinder* raw = nullptr;
++    for (size_t i = 0; i < kMaxAttempts && raw == nullptr; ++i) {
++        if (i != 0) usleep(100 * 1000);
++        raw = AServiceManager_checkService(keystore2_service_name);
++    }
++    if (raw == nullptr) {
++        LOG(ERROR) << "Vold: keystore2 did not register within " << (kMaxAttempts * 100)
++                   << " ms; not blocking forever.";
++    }
++    ::ndk::SpAIBinder binder(raw);
+     auto keystore2Service = ks2::IKeystoreService::fromBinder(binder);
+ 
+     if (!keystore2Service) {
+         LOG(ERROR) << "Vold unable to connect to keystore2.";
++        printf("[de] Keymaster ctor: keystore2 NOT connected (raw=%p)\n", (void*)raw);
++        fflush(stdout);
+         return;
+     }
+ 
+@@ -125,6 +158,9 @@ Keymaster::Keymaster() {
+                                                  &securityLevel);
+     if (logKeystore2ExceptionIfPresent(rc, "getSecurityLevel"))
+         LOG(ERROR) << "Vold unable to get security level from keystore2.";
++    printf("[de] Keymaster ctor: connected=1 getSecurityLevel_ok=%d securityLevel=%d\n",
++           (int)rc.isOk(), (int)(bool)securityLevel);
++    fflush(stdout);
+ }
+ 
+ bool Keymaster::generateKey(const km::AuthorizationSet& inParams, std::string* key) {

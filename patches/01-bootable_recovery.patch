@@ -1,0 +1,501 @@
+diff --git a/etc/init/keystore2.rc b/etc/init/keystore2.rc
+index fa62662..1a42ebc 100644
+--- a/etc/init/keystore2.rc
++++ b/etc/init/keystore2.rc
+@@ -9,9 +9,28 @@
+ on late-init
+     start keystore2
+ 
++# BUILD 12 DIAGNOSTIC -- send keystore2's stdout/stderr to kmsg
++# --------------------------------------------------------------
++# Observed in build 11: keystore2 aborts with signal 6 about 1 s after
++# km_compat's probe ladder (4.1 -> 4.0 -> 3.0) finds the keymaster 3.0
++# HAL, roughly every 5 s (keystore.crash_count 2 -> 85 in 7 minutes).
++# The abort message was unobtainable: this service had no stdio
++# redirection, so init pointed both fds at /dev/null; tombstoned is not
++# running in recovery (no new tombstone); core_pattern is "core" but
++# RLIMIT_CORE is 0; and logd/logcat do not exist.
++#
++# stdio_to_kmsg (system/core/init/service_parser.cpp:570, README.md:325)
++# connects ONLY stdout and stderr to /dev/kmsg, so panic/LOG(FATAL)
++# text becomes visible in dmesg. It changes nothing except where the
++# bytes go. See system/core/init/README.md:890 for the intended use.
++#
++# Not mutually exclusive with `console` here because there is no
++# `console` line in this service (service_parser.cpp:87-88).
++
+ service keystore2 /system/bin/keystore2 /tmp/misc/keystore
+     class early_hal
+     user root
+     group keystore readproc log
+     writepid /dev/cpuset/foreground/tasks
+     seclabel u:r:recovery:s0
++    stdio_to_kmsg
+diff --git a/gui/action.cpp b/gui/action.cpp
+index 0d09400..32d48ea 100755
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -682,6 +682,7 @@ int GUIAction::restoredefaultsettings(std::string arg __unused)
+ int GUIAction::copylog(std::string arg __unused)
+ {
+ 	operation_start("Copy Log");
++	int copy_status = 0;
+ 	if (!simulate)
+ 	{
+ 		string dst, curr_storage;
+@@ -693,17 +694,25 @@ int GUIAction::copylog(std::string arg __unused)
+ 		PartitionManager.Mount_Current_Storage(true);
+ 		curr_storage = DataManager::GetCurrentStoragePath();
+ 		dst = curr_storage + "/recovery.log";
+-		TWFunc::copy_file("/tmp/recovery.log", dst.c_str(), 0755);
+-		tw_set_default_metadata(dst.c_str());
++		copy_status = TWFunc::copy_file("/tmp/recovery.log", dst.c_str(), 0755);
++		if (copy_status != 0)
++			copy_status = 1; // failure
++		else
++			tw_set_default_metadata(dst.c_str());
+ 		if (copy_kernel_log)
+ 			TWFunc::copy_kernel_log(curr_storage);
+ 		if (copy_logcat)
+ 			TWFunc::copy_logcat(curr_storage);
+ 		sync();
+-		gui_msg(Msg("copy_log=Copied recovery log to {1}")(dst));
++		// Report the truth: this printed unconditionally, so a failed copy still
++		// claimed success on screen even though no file had been written.
++		if (copy_status == 0)
++			gui_msg(Msg("copy_log=Copied recovery log to {1}")(dst));
++		else
++			LOGERR("Unable to copy recovery log to %s\n", dst.c_str());
+ 	} else
+ 		simulate_progress_bar();
+-	operation_end(0);
++	operation_end(copy_status);
+ 	return 0;
+ }
+ 
+@@ -1986,7 +1995,34 @@ int GUIAction::installapp(std::string arg __unused)
+ 	operation_start("Install TWRP App");
+ 	if (!simulate)
+ 	{
+-		if (DataManager::GetIntValue("tw_mount_system_ro") > 0 || DataManager::GetIntValue("tw_app_install_system") == 0) {
++		// BUILD 26: choose the install target by what the system partition can
++		// actually do, not only by tw_mount_system_ro. On this device the system
++		// fstab entry is 'ro' and the kernel refuses rw mounts of it (ext4
++		// ro_compat 0x4000 unknown to this kernel), so the system branch could
++		// only ever mkdir() into an EROFS tree. Gate on Is_Read_Only() before
++		// mounting (set true at fstab parse for a 'ro' entry - no mount side
++		// effects) and re-check actual writability after a mount; fall back to
++		// TWRP's own /data/app path - the path TWRP designs for ro systems -
++		// in both cases.
++		bool install_to_system = (DataManager::GetIntValue("tw_mount_system_ro") == 0 &&
++					DataManager::GetIntValue("tw_app_install_system") != 0);
++		TWPartition* sys_part = PartitionManager.Find_Partition_By_Path(PartitionManager.Get_Android_Root_Path());
++		if (install_to_system) {
++			if (!sys_part || sys_part->Is_Read_Only()) {
++				LOGINFO("System partition is read-only, installing TWRP app to /data/app instead\n");
++				install_to_system = false;
++			} else {
++				bool was_mounted = PartitionManager.Is_Mounted_By_Path(PartitionManager.Get_Android_Root_Path());
++				if (!PartitionManager.Mount_By_Path(PartitionManager.Get_Android_Root_Path(), true) ||
++						sys_part->Is_Read_Only() || !sys_part->Is_File_System_Writable()) {
++					LOGINFO("System partition is not writable, installing TWRP app to /data/app instead\n");
++					install_to_system = false;
++					if (!was_mounted)
++						PartitionManager.UnMount_By_Path(PartitionManager.Get_Android_Root_Path(), false);
++				}
++			}
++		}
++		if (!install_to_system) {
+ 			if (PartitionManager.Mount_By_Path("/data", true)) {
+ 				string install_path = "/data/app";
+ 				string context = "u:object_r:apk_data_file:s0";
+@@ -2080,7 +2116,11 @@ int GUIAction::installapp(std::string arg __unused)
+ 						PartitionManager.UnMount_By_Path(PartitionManager.Get_Android_Root_Path(), true);
+ 						op_status = 0;
+ 					} else {
+-						LOGERR("Error making app directory '%s': %s\n", strerror(errno));
++						// BUILD 26: two %s but only one argument - the missing
++						// install_path made printf read a garbage vararg and
++						// SEGV (fault addr 0xffffffffffffffe0) whenever mkdir()
++						// failed on the read-only system partition.
++						LOGERR("Error making app directory '%s': %s\n", install_path.c_str(), strerror(errno));
+ 					}
+ 				}
+ 			}
+diff --git a/partition.cpp b/partition.cpp
+index 184cb16..e9ccf99 100755
+--- a/partition.cpp
++++ b/partition.cpp
+@@ -1583,11 +1583,117 @@ bool TWPartition::Is_File_System_Writable(void) {
+ 	return (access(test_path.c_str(), W_OK) == 0);
+ }
+ 
++// fscrypt keys added with FS_IOC_ADD_ENCRYPTION_KEY belong to the *mounted
++// superblock*: an umount of /data discards them, and the next mount() creates a
++// fresh superblock with an empty key store. Setup_Data_Partition() unmounts
++// /data ("Ensure /data is not mounted as tmpfs") and later remounts it, so the
++// DE keys installed by Decrypt_FBE_DE() can end up on a superblock that is gone.
++// Symptom on this device: /data/system and /data/misc show ciphertext names and
++// /data/system_de/0/spblob becomes unreachable (ENOENT), which makes the FBE
++// credential path fall back to gatekeeper.*.key and report "Unknown password
++// type". Re-install the DE keys at every mount of /data instead.
++#if defined(TW_INCLUDE_CRYPTO) && defined(TW_INCLUDE_FBE)
++static bool FBE_Dir_Has_Plaintext(const char* path, const char* name) {
++	DIR* dir = opendir(path);
++	if (dir == NULL)
++		return false;
++	bool found = false;
++	struct dirent* de;
++	while ((de = readdir(dir)) != NULL) {
++		// plaintext entries that always exist in these dirs;
++		// ciphertext names are ~30-45 chars of base64 and never equal these
++		if (strcmp(de->d_name, name) == 0) {
++			found = true;
++			break;
++		}
++	}
++	closedir(dir);
++	return found;
++}
++
++static bool FBE_DE_Names_Are_Plaintext() {
++	// both keys must be live on the *current* superblock, and they protect
++	// different dirs, so check one marker per key:
++	//   /data/system          -> systemwide DE key (/data/unencrypted/key)
++	//   /data/system_de/0     -> per-user DE key (/data/misc/vold/user_keys/de/0),
++	//                            holds the spblob the credential path needs
++	if (!FBE_Dir_Has_Plaintext("/data/system", "users") &&
++	    !FBE_Dir_Has_Plaintext("/data/system", "packages.xml"))
++		return false;
++	if (TWFunc::Path_Exists("/data/system_de/0") &&
++	    !FBE_Dir_Has_Plaintext("/data/system_de/0", "spblob"))
++		return false;
++	return true;
++}
++
++// Read the live mount state from /proc/mounts: TWRP's Mount_Read_Only flag is
++// only the *intent*, and Update_Size() can leave a probe mount behind.
++static bool Mount_Point_Is_Read_Only(const std::string& point) {
++	FILE* f = fopen("/proc/mounts", "r");
++	if (f == NULL)
++		return false;
++	char dev[256], mp[400], type[64], opts[512];
++	bool ro = false;
++	while (fscanf(f, "%255s %399s %63s %511s %*d %*d\n", dev, mp, type, opts) == 4) {
++		if (point == mp) {
++			ro = (strncmp(opts, "ro,", 3) == 0) || (strcmp(opts, "ro") == 0) ||
++			     (strstr(opts, ",ro") != NULL);
++			break;
++		}
++	}
++	fclose(f);
++	return ro;
++}
++
++void TWPartition::Ensure_Mounted_RW(const char* why) {
++	if (Mount_Read_Only)
++		return;                       // this partition is meant to be read-only
++	if (!Is_Mounted())
++		return;
++	if (!Mount_Point_Is_Read_Only(Mount_Point))
++		return;
++	printf("[de] Ensure_Mounted_RW(%s): %s is ro, remounting rw\n", why, Mount_Point.c_str());
++	fflush(stdout);
++	// keep the partition's own VFS flags (nosuid/nodev/noatime), drop MS_RDONLY
++	unsigned int flags = MS_REMOUNT | (Mount_Flags & ~MS_RDONLY);
++	if (mount(NULL, Mount_Point.c_str(), NULL, flags,
++	          Mount_Options.empty() ? NULL : Mount_Options.c_str()) != 0) {
++		printf("[de] Ensure_Mounted_RW(%s): remount FAILED errno=%d (%s)\n",
++		       why, errno, strerror(errno));
++		fflush(stdout);
++	} else {
++		printf("[de] Ensure_Mounted_RW(%s): remount rw OK\n", why);
++		fflush(stdout);
++	}
++}
++
++void TWPartition::Ensure_FBE_DE_Keys(const char* why) {
++	if (Mount_Point != "/data")
++		return;
++	if (!TWFunc::Path_Exists("/data/unencrypted/key/version"))
++		return;
++	// Decrypt_DE() rewrites /data/unencrypted/{mode,ref,per_boot_ref}, so the
++	// mount has to be writable or the systemwide stage fails with EROFS
++	Ensure_Mounted_RW(why);
++	if (FBE_DE_Names_Are_Plaintext())
++		return;
++	printf("[de] Ensure_FBE_DE_Keys(%s): DE names not plaintext, reinstalling keys\n", why);
++	fflush(stdout);
++	bool ok = android::keystore::Decrypt_DE();
++	printf("[de] Ensure_FBE_DE_Keys(%s): Decrypt_DE=%d names_plaintext=%d\n",
++	       why, ok ? 1 : 0, FBE_DE_Names_Are_Plaintext() ? 1 : 0);
++	fflush(stdout);
++}
++#endif
++
+ bool TWPartition::Mount(bool Display_Error) {
+ 	int exfat_mounted = 0;
+ 	unsigned int flags = Mount_Flags;
+ 
+ 	if (Is_Mounted()) {
++#if defined(TW_INCLUDE_CRYPTO) && defined(TW_INCLUDE_FBE)
++		Ensure_FBE_DE_Keys("already-mounted");
++#endif
+ 		return true;
+ 	} else if (!Can_Be_Mounted) {
+ 		return false;
+@@ -1688,9 +1794,20 @@ bool TWPartition::Mount(bool Display_Error) {
+ 	if (Current_File_System == "exfat" && TWFunc::Path_Exists("/sys/module/texfat"))
+ 		mount_fs = "texfat";
+ 
++	bool mounted_ro_fallback = false;
+ 	if (!exfat_mounted &&
+ 		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags, Mount_Options.c_str()) != 0 &&
+ 		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags, NULL) != 0) {
++		// BUILD 24: some kernels refuse rw mounts they would accept read-only
++		// (this device's stock 4.19.127+ does not know ext4 ro_compat 0x4000
++		// shared_blocks on system/vendor: mount(rw) -> EINVAL, mount(ro) ok).
++		// Retry read-only instead of leaving the partition unmounted, and
++		// record the real state so later writes fail with a clean EROFS.
++		if (!(flags & MS_RDONLY) &&
++			(mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags | MS_RDONLY, Mount_Options.c_str()) == 0 ||
++			 mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags | MS_RDONLY, NULL) == 0)) {
++			mounted_ro_fallback = true;
++		} else {
+ #ifdef TW_NO_EXFAT_FUSE
+ 		if (Current_File_System == "exfat") {
+ 			LOGINFO("Mounting exfat failed, trying vfat...\n");
+@@ -1713,8 +1830,18 @@ bool TWPartition::Mount(bool Display_Error) {
+ #ifdef TW_NO_EXFAT_FUSE
+ 		}
+ #endif
++		}
++	}
++	if (mounted_ro_fallback) {
++		Mount_Read_Only = true;
++		printf("[mount] '%s': rw refused by kernel, mounted read-only instead\n", Mount_Point.c_str());
++		fflush(stdout);
+ 	}
+ 
++#if defined(TW_INCLUDE_CRYPTO) && defined(TW_INCLUDE_FBE)
++	// fresh superblock for this mount: the previous mount's DE keys are gone
++	Ensure_FBE_DE_Keys("fresh-mount");
++#endif
+ 	if (Removable)
+ 		Update_Size(Display_Error);
+ 
+@@ -3121,9 +3248,17 @@ bool TWPartition::Update_Size(bool Display_Error) {
+ 		UnMount(false);
+ success:
+ 	Mount_Read_Only = ro;
++	// We mounted this partition read-only for size probing; if it is still
++	// mounted (the unmount above failed - /data with data/media bind is busy),
++	// do not leave it read-only: that breaks sqlite (locksettings.db handle)
++	// and every write to /data, including the FBE credential decrypt.
++	if (!Was_Already_Mounted && Is_Mounted() && !ro)
++		Ensure_Mounted_RW("size-probe-left-mounted");
+ 	return true;
+ fail:
+ 	Mount_Read_Only = ro;
++	if (!Was_Already_Mounted && Is_Mounted() && !ro)
++		Ensure_Mounted_RW("size-probe-left-mounted");
+ 	return false;
+ }
+ 
+diff --git a/partitionmanager.cpp b/partitionmanager.cpp
+index 2766b4c..e9d96d7 100755
+--- a/partitionmanager.cpp
++++ b/partitionmanager.cpp
+@@ -2124,6 +2124,20 @@ int TWPartitionManager::Decrypt_Device(string Password, int user_id) {
+ 		if (!Mount_By_Path("/data", true)) // /data has to be mounted for FBE
+ 			return -1;
+ 
++#if defined(TW_INCLUDE_CRYPTO) && defined(TW_INCLUDE_FBE)
++		{
++			// belt and braces: the password path needs a *writable* mount
++			// (sqlite opens /data/system/locksettings.db read-write for the
++			// sp-handle) and plaintext names to reach /data/system_de/0/spblob,
++			// so re-check both right before decrypting
++			TWPartition* fbe_data = Find_Partition_By_Path("/data");
++			if (fbe_data != NULL) {
++				fbe_data->Ensure_Mounted_RW("pre-ce-decrypt");
++				fbe_data->Ensure_FBE_DE_Keys("pre-ce-decrypt");
++			}
++		}
++#endif
++
+ 		bool user_need_decrypt = false;
+ 		std::vector<users_struct>::iterator iter;
+ 		for (iter = Users_List.begin(); iter != Users_List.end(); iter++) {
+diff --git a/partitions.hpp b/partitions.hpp
+index 843dfe5..c22c121 100755
+--- a/partitions.hpp
++++ b/partitions.hpp
+@@ -181,6 +181,8 @@ protected:
+ 	bool Has_Data_Media;                                                      // Indicates presence of /data/media, may affect wiping and backup methods
+ 	void Setup_Data_Media();                                                  // Sets up a partition as a /data/media emulated storage partition
+ 	void Set_Block_Device(std::string block_device);                          // Allow super partition setup to change block device
++	void Ensure_FBE_DE_Keys(const char* why);                                 // Re-install FBE DE keys if /data policy-dir names are not plaintext (FS_IOC_ADD_ENCRYPTION_KEY keys die with their superblock)
++	void Ensure_Mounted_RW(const char* why);                                  // Remount rw when the live mount is ro but the partition is meant to be rw (Update_Size probe mounts)
+ 
+ private:
+ 	bool Process_Fstab_Line(const char *fstab_line, bool Display_Error, std::map<string, Flags_Map> *twrp_flags); // Processes a fstab line
+diff --git a/prebuilt/Android.mk b/prebuilt/Android.mk
+index 3197ec1..e97b989 100755
+--- a/prebuilt/Android.mk
++++ b/prebuilt/Android.mk
+@@ -177,6 +177,21 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
+     RECOVERY_LIBRARY_SOURCE_FILES += $(TARGET_OUT_VENDOR_SHARED_LIBRARIES)/libnos_datagram.so
+     RECOVERY_LIBRARY_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.keymaster@3.0.so
+     RECOVERY_LIBRARY_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libgpt_twrp.so
++    # libresetprop is a required consequence of TW_INCLUDE_CRYPTO, and it must be
++    # listed HERE, not just in TWRP_REQUIRED_MODULES:
++    #   Android.mk:368   TW_INCLUDE_LIBRESETPROP := true   (inside the crypto block)
++    #   Android.mk:443   LOCAL_SHARED_LIBRARIES += libresetprop   -> DT_NEEDED
++    #   Android.mk:544   TWRP_REQUIRED_MODULES += libresetprop
++    # TWRP_REQUIRED_MODULES flows into the `recovery` module's LOCAL_REQUIRED_MODULES
++    # (Android.mk:645), which builds/installs it but does NOT place shared libs in
++    # $(TARGET_RECOVERY_ROOT_OUT).  Only this list does, via relink_libraries'
++    # LOCAL_REQUIRED_MODULES at prebuilt/Android.mk:429-433, and relink.sh then
++    # copies them in (relink.sh:8 skips absent sources, so this is safe when the
++    # crypto flag is off).  Without this line the .so was missing from the ramdisk:
++    # bionic's linker aborted before main() could run, `init: Service 'recovery'
++    # exited with status 1` in ~14 ms and the device hung on the boot logo.
++    # Recovery with TW_INCLUDE_CRYPTO, build 7.
++    RECOVERY_LIBRARY_SOURCE_FILES += $(TARGET_OUT_SHARED_LIBRARIES)/libresetprop.so
+     ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
+         ifeq ($(TARGET_CRYPTFS_HW_PATH),)
+             RECOVERY_LIBRARY_SOURCE_FILES += $(TARGET_OUT_VENDOR_SHARED_LIBRARIES)/libcryptfs_hw.so
+@@ -430,7 +445,16 @@ TARGET_LIBRARY_RELINK_FILES := $(notdir $(RECOVERY_LIBRARY_SOURCE_FILES))
+ TARGET_BASE_LIBRARY_RELINK_MODULES := $(basename $(TARGET_LIBRARY_RELINK_FILES))
+ TARGET_RELINK_LIBRARY_MODULES :=  $(filter-out libdexfile, $(TARGET_BASE_LIBRARY_RELINK_MODULES))
+ LOCAL_REQUIRED_MODULES += $(TARGET_RELINK_LIBRARY_MODULES)
++# Same order-only trap as relink_binaries below: LOCAL_REQUIRED_MODULES maps to
++# `$(1): | $(2)` (build/make/core/main.mk:760-762), which never re-dirties this
++# stamp, so LOCAL_POST_INSTALL_CMD's copies into the recovery ramdisk would stop
++# refreshing after the first build. Re-declare the identical, already-resolved
++# set as NORMAL prerequisites.
++# $(filter $(TARGET_OUT_ROOT)/%, ...) as in relink_binaries below: it discards
++# the host outputs that module-installed-files() also returns.
++RELINK_LIBRARIES_DEPS := $(filter $(TARGET_OUT_ROOT)/%, $(call module-installed-files,$(TARGET_RELINK_LIBRARY_MODULES)))
+ include $(BUILD_PHONY_PACKAGE)
++$(LOCAL_INSTALLED_MODULE): $(RELINK_LIBRARIES_DEPS)
+ 
+ 
+ include $(CLEAR_VARS)
+@@ -441,7 +465,34 @@ LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/
+ LOCAL_POST_INSTALL_CMD += $(RELINK) $(TARGET_RECOVERY_ROOT_OUT)/system/bin $(RECOVERY_BINARY_SOURCE_FILES)
+ TARGET_BINARY_RELINK_FILES := $(filter-out bu, $(notdir $(RECOVERY_BINARY_SOURCE_FILES)))
+ LOCAL_REQUIRED_MODULES += $(TARGET_BINARY_RELINK_FILES)
++# NORMAL prerequisites for the files LOCAL_POST_INSTALL_CMD copies above.
++#
++# LOCAL_REQUIRED_MODULES only ever yields an ORDER-ONLY prerequisite:
++# build/make/core/main.mk:760-762 defines
++#     define add-required-deps
++#     $(1): | $(2)
++#     endef
++# Order-only inputs are built first but never re-dirty the target, so from the
++# second build onward this stamp never went stale and relink.sh never ran again --
++# while the mkbootfs packing rule (rule38116, `mkbootfs -d $(TARGET_OUT)
++# $(TARGET_RECOVERY_ROOT_OUT)`) kept packaging the stale copy. Observed: keystore2
++# rebuilt to md5 410f7a0d... in $(TARGET_OUT) yet recovery/root still held
++# build-12's 819e2b5f..., and `mka recoveryimage` reported "no work to do.".
++#
++# The set is re-declared from module-installed-files() -- the exact same
++# resolution kati already performed for LOCAL_REQUIRED_MODULES -- so no NEW
++# prerequisites are introduced and nothing can fail to resolve.
++#
++# The $(filter $(TARGET_OUT_ROOT)/%, ...) is NOT optional: module-installed-files
++# returns EVERY installed path for a module name, host included, whereas
++# main.mk:811-814 filters required deps to $(TARGET_OUT_ROOT)/% before emitting
++# them. Skipping the filter pulled out/host/linux-x86/** into the recoveryimage
++# closure (host libhidlbase.so, host e2fsck/toybox/sgdisk, ...), and host
++# libhidlbase cannot compile in this tree -- ServiceManagement.cpp:49
++# '#include <vndksupport/linker.h>' has no provider.
++RELINK_BINARIES_DEPS := $(filter $(TARGET_OUT_ROOT)/%, $(call module-installed-files,$(TARGET_BINARY_RELINK_FILES)))
+ include $(BUILD_PHONY_PACKAGE)
++$(LOCAL_INSTALLED_MODULE): $(RELINK_BINARIES_DEPS)
+ 
+ include $(CLEAR_VARS)
+ LOCAL_MODULE := relink_vendor_hw_binaries
+@@ -452,7 +503,11 @@ LOCAL_POST_INSTALL_CMD += $(RELINK) $(TARGET_RECOVERY_ROOT_OUT)/vendor/bin/hw $(
+ TARGET_VENDOR_BINARY_RELINK_FILES := $(notdir $(RECOVERY_VENDOR_HW_BINARY_FILES))
+ LOCAL_REQUIRED_MODULES += $(TARGET_VENDOR_BINARY_RELINK_FILES)
+ $(warning vendor_hw: $(LOCAL_POST_INSTALL_CMD))
++# Same order-only trap as relink_binaries above -- see the comment there.
++# $(filter $(TARGET_OUT_ROOT)/%, ...) as in relink_binaries above.
++RELINK_VENDOR_HW_DEPS := $(filter $(TARGET_OUT_ROOT)/%, $(call module-installed-files,$(TARGET_VENDOR_BINARY_RELINK_FILES)))
+ include $(BUILD_PHONY_PACKAGE)
++$(LOCAL_INSTALLED_MODULE): $(RELINK_VENDOR_HW_DEPS)
+ 
+ #build out TWRP ramdisk
+ include $(CLEAR_VARS)
+diff --git a/twrp-functions.cpp b/twrp-functions.cpp
+index 1a404c6..dec1f33 100644
+--- a/twrp-functions.cpp
++++ b/twrp-functions.cpp
+@@ -726,10 +726,19 @@ int TWFunc::copy_file(string src, string dst, int mode, bool mount_paths) {
+ 		return -1;
+ 	}
+ 	std::ifstream srcfile(src.c_str(), ios::binary);
++	if (!srcfile.is_open()) {
++		LOGERR("Unable to open source file %s for reading. Error: %s\n", src.c_str(), strerror(errno));
++		return -1;
++	}
+ 	std::ofstream dstfile(dst.c_str(), ios::binary);
++	if (!dstfile.is_open()) {
++		LOGERR("Unable to open destination file %s for writing. Error: %s\n", dst.c_str(), strerror(errno));
++		return -1;
++	}
+ 	dstfile << srcfile.rdbuf();
+-	if (dstfile.bad()) {
+-		LOGINFO("Unable to copy file %s to %s\n", src.c_str(), dst.c_str());
++	dstfile.flush();
++	if (dstfile.bad() || srcfile.bad()) {
++		LOGERR("Unable to copy file %s to %s. Error: %s\n", src.c_str(), dst.c_str(), strerror(errno));
+ 		return -1;
+ 	}
+ 
+diff --git a/twrp.cpp b/twrp.cpp
+index eedc581..8f07ec4 100644
+--- a/twrp.cpp
++++ b/twrp.cpp
+@@ -275,6 +275,7 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
+ 	// Check if system has never been changed
+ 	TWPartition* sys = PartitionManager.Find_Partition_By_Path(PartitionManager.Get_Android_Root_Path());
+ 	TWPartition* ven = PartitionManager.Find_Partition_By_Path("/vendor");
++	(void)ven; // BUILD 24: only the removed force-rw code read this
+ 	if (sys) {
+ 		if (sys->Get_Super_Status()) {
+ #ifdef TW_INCLUDE_CRYPTO
+@@ -295,16 +296,24 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
+ 						LOGERR("Failed to start system_readonly GUI page.\n");
+ 					}
+ 				} else if (DataManager::GetIntValue("tw_mount_system_ro") == 0) {
+-					sys->Change_Mount_Read_Only(false);
+-					if (ven)
+-						ven->Change_Mount_Read_Only(false);
++					// BUILD 24: do not force rw. This device's stock kernel
++					// (4.19.127+) refuses rw mounts of system/vendor: ext4
++					// ro_compat 0x4000 (shared_blocks) is unknown to it, so
++					// mount() returns EINVAL. Keep the fstab's "ro".
++					printf("[mount] system/vendor stay read-only (kernel cannot mount them rw)\n");
++					fflush(stdout);
+ 				}
+ 			} else if (DataManager::GetIntValue("tw_mount_system_ro") == 1) {
+ 				// Do nothing, user selected to leave system read only
+ 			} else {
+-				sys->Change_Mount_Read_Only(false);
+-				if (ven)
+-					ven->Change_Mount_Read_Only(false);
++				// BUILD 24: on a clean device this else-branch is what runs -
++				// tw_mount_system_ro reads as 0 before the settings file is
++				// loaded, and Check_Lifetime_Writes() != 0 for a factory-flashed
++				// system - so every boot forced system+vendor rw and all mounts
++				// then failed with EINVAL (kernel does not know ext4 ro_compat
++				// 0x4000 shared_blocks). Keep the fstab's "ro".
++				printf("[mount] system/vendor stay read-only (kernel cannot mount them rw)\n");
++				fflush(stdout);
+ 			}
+ 		}
+ 	}

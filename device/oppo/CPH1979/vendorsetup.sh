@@ -1,0 +1,2 @@
+add_lunch_combo twrp_CPH1979-eng
+add_lunch_combo twrp_CPH1979-userdebug

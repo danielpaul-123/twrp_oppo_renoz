@@ -1,0 +1,88 @@
+# init.recovery.mt6779.rc
+#
+# Ported from the STOCK recovery ramdisk: dump/recovery.bin, gzip+cpio payload
+# at offset 13998080 (30430430 B), file ./init.recovery.mt6779.rc.
+# Referenced by system/etc/init/hw/init.rc line 6:
+#     import /init.recovery.${ro.hardware}.rc      (ro.hardware = mt6779)
+# Without this file that import resolves to nothing and init continues silently.
+#
+# WHY THIS FILE IS REQUIRED -- Phase 5 live finding (2026-10-02):
+#
+#  1. system/etc/init/hw/init.rc does "setprop sys.usb.configfs 0" inside
+#     "on early-init" (stock: line 11, ours: line 21). Stock then overrides it
+#     to 1 in "on init" using THIS file (stock file line 2), so stock ends up on
+#     the configfs gadget path. We shipped no such file, so we stayed at 0.
+#
+#  2. configfs=0 routes init to the legacy gadget:
+#       on property:sys.usb.config=adb && property:sys.usb.configfs=0
+#           write /sys/class/android_usb/android0/idProduct D001
+#           write /sys/class/android_usb/android0/functions adb
+#           write /sys/class/android_usb/android0/enable 1
+#     plus init.recovery.usb.rc's equivalent "on fs" block.
+#
+#  3. This kernel has NO legacy android gadget. IKCONFIG recovered from the
+#     gunzipped kernel Image (13995930 B gz -> 38490112 B) lists, in full:
+#         CONFIG_USB_GADGET=y
+#         CONFIG_USB_CONFIGFS=y   (+ SERIAL/ACM/RNDIS/MASS_STORAGE/MTK_FASTMETA/
+#                                   F_FS/F_ACC/F_AUDIO_SRC/F_MIDI/F_HID/F_UVC)
+#     and no CONFIG_USB_ANDROID option anywhere (checked by full listing, not a
+#     narrow grep). So /sys/class/android_usb/android0 does not exist, every
+#     write above fails with ENOENT, the gadget is never enabled, and the host
+#     never sees a USB device -- which is what we observed: TWRP UI boots and is
+#     usable on-screen, but adb and sideload see nothing.
+#
+#  4. sys.usb.ffs.aio_compat is NOT read by adbd; it is read by TWRP's MTP
+#     (bootable/recovery/mtp/ffs/MtpServer.cpp:124 -> MtpFfsCompatHandle) and by
+#     fastbootd (system/core/fastboot/device/usb.cpp:212). Stock sets it to 1,
+#     so this keeps stock's proven MTP handle selection.
+#
+#  5. The UDC on this board is MTU3, not MUSB: IKCONFIG has
+#         CONFIG_USB_MTU3=y, CONFIG_USB_MTU3_DUAL_ROLE=y
+#         # CONFIG_USB_MUSB_HDRC is not set
+#     so sys.usb.controller resolves to the mtu3 UDC via /sys/class/udc (init.cpp:540).
+#
+#  6. With configfs=1 the path in init.rc is complete and stock-proven:
+#       on fs && property:sys.usb.configfs=1     mount configfs; mkdir g1 +
+#                                                 ffs.adb / ffs.fastboot
+#       on fs && property:ro.debuggable=1        setprop sys.usb.config adb
+#                                                 (eng build -> ro.debuggable=1)
+#       on property:sys.usb.config=adb           start adbd
+#       adbd                                    setprop sys.usb.ffs.ready 1
+#                                                 (packages/modules/adb/daemon/
+#                                                  usb_ffs.cpp:302)
+#       on property:sys.usb.config=adb && ffs.ready=1 && configfs=1
+#                                               symlink ffs.adb into b.1 and
+#                                               write g1/UDC ${sys.usb.controller}
+#       ${sys.usb.controller} is auto-detected by init from /sys/class/udc
+#       (system/core/init/init.cpp:540-552, called at init.cpp:840 and retried
+#        every main-loop iteration at init.cpp:948, so it self-heals).
+#
+# NOT PORTED from stock's file -- its "on post-fs" block:
+#       wait /dev/block/mmcblk0boot0 2
+#       symlink ... preloader_a / preloader_b / preloader_{emmc,ufs}_{a,b}
+#       exec u:r:update_engine:s0 root root -- /system/bin/mtk_plpath_utils
+#   * that "wait" targets an eMMC boot region; this device is UFS, the node is
+#     absent, so it would only add a pointless 2 s to every recovery boot;
+#   * system/bin/mtk_plpath_utils does NOT exist in this ramdisk (verified), so
+#     the exec would fail anyway;
+#   * the preloader symlinks are not needed by recovery.
+#   Revisit only if a Phase 5 probe shows recovery actually needs them.
+
+on init
+    setprop sys.usb.configfs 1
+    setprop sys.usb.ffs.aio_compat 1
+
+# From stock, verbatim apart from comments. Never fires on eng/userdebug builds
+# (ro.debuggable=1), which is what we build.
+#
+# NOTE: stock's "cmode" write targets /sys/class/udc/musb-hdrc/, but this
+# kernel has # CONFIG_USB_MUSB_HDRC is not set (UDC is MTU3, see note 5), so on
+# this hardware that particular write is a no-op that fails with ENOENT -- in
+# stock recovery too, where ro.debuggable=0 and this block does run. init's
+# builtin "write" failures are non-fatal: the following "start adbd" still
+# executes, which is the part that matters. Kept for fidelity to stock.
+on fs && property:ro.debuggable=0
+    # distinguish USB should connect or not, i.e. CDP vs SDP
+    write /sys/class/udc/musb-hdrc/device/cmode 2
+    # set charging free due to it waits for USB activation
+    start adbd

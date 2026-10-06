@@ -1,0 +1,6 @@
+# Symlinks inside the extracted dirs (extract-blobs.sh recreates these).
+# Format: <path relative to this directory> -> <link target>
+recovery/root/system/lib64/hw/keystore.mt6779.so -> libMcTeeKeymaster.so
+recovery/root/vendor/lib64/hw/gatekeeper.oppo6779.so -> libMcGatekeeper.so
+recovery/root/vendor/lib64/hw/gatekeeper.default.so -> libSoftGatekeeper.so
+recovery/root/vendor/lib64/hw/gatekeeper.mt6779.so -> libMcGatekeeper.so

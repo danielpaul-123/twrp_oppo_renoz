@@ -1,0 +1,170 @@
+# init.recovery.fbe.rc -- FBE decryption support for TWRP on OPPO Reno Z
+#                          (CPH1979 / MT6779, Android 11 vendor, HIDL keymaster 3.0)
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Build 8 hung for ever on the TWRP splash screen with recovery.log frozen at
+# "Attempting to initialize DE keys". The full chain, every link verified:
+#
+#   1. Recovery never mounts /vendor -- /proc/mounts shows only /cache (sdc44)
+#      and /data (sdc45) -- so /vendor/etc/vintf/manifest.xml does not exist.
+#   2. keystore2 starts on "on late-init" (system/etc/init/keystore2.rc) and
+#      its very first act is to enumerate keymaster HALs:
+#        shared_secret_negotiation.rs -> get_hidl_instances()
+#        -> system/security/keystore2/src/vintf/vintf.cpp getHidlInstances()
+#        -> VintfObject::GetDeviceHalManifest()
+#      That call returns nullptr when the manifest cannot be read, and vintf.cpp
+#      called straight into it. HalGroup::forEachInstanceOfInterface
+#      (system/libvintf/include/vintf/HalGroup.h:124) forwards to the
+#      pure-virtual forEachInstanceOfVersion(), so a null manifest dispatches
+#      through a null `this`, loads the vptr from address 0 and raises
+#      SIGSEGV (SEGV_MAPERR, fault addr 0x0). Confirmed on-device: core dump
+#      + addr2line resolved the PC to libvintf.so + HalGroup.h:124.
+#   3. init restarted keystore2 every ~5 s (~198 times), so servicemanager
+#      never held it ("Could not find 'aidl/...IKeystoreService/default' for
+#      ctl.interface_start", every second), so vold's Keymaster constructor --
+#      which waited for keystore2 for ever -- never returned, so the recovery
+#      UI was never created.
+#
+# THE FIX, THIS HALF (the other half is source-level, see below)
+# --------------------------------------------------------------
+# Ship the vendor VINTF device manifest and the whole keymaster/TEE/gatekeeper
+# stack IN THE RAMDISK, which is exactly what OPPO's own recovery does.
+# Evidence: dump/recovery.bin ramdisk, ./init_A.rc
+#   :71-75   mkdir + "mount ext4 /dev/block/by-name/persist /mnt/vendor/persist
+#            rw", while the /vendor and /system mounts are left commented out
+#            ("Remove for can't umount /vendor in OTA update") -- OPPO
+#            deliberately ships vendor content in the ramdisk instead.
+#   :268,271,277,325
+#            the four service definitions below, all verbatim, all with
+#            `seclabel u:r:recovery:s0`, no `user`/`group` (recovery runs
+#            everything as root) and no `class` line, so they belong to class
+#            `default`.
+#   :87      "on boot -> class_start default".
+#
+# ramdisk/vendor/etc/vintf/manifest.xml here is a byte-identical copy of
+# dump/vendor.bin:/etc/vintf/manifest.xml (md5 718cbea4f9c1daa2bae82de9552e9675),
+# which is the file GetDeviceHalManifest() reads. It declares
+#   <fqname>@3.0::IKeymasterDevice/default</fqname>
+# i.e. HIDL keymaster 3.0 only -- no AIDL KeyMint, no 4.x. keystore2 handles
+# that through the compatibility bridge: keystore2/src/km_compat/Android.bp
+# links android.hardware.keymaster@3.0 and globals.rs documents
+# "KM 3.0 = 30" as one of only three supported values (30/40/41).
+#
+# ORDERING IS DETERMINISTIC (system/etc/init/hw/init.rc:71-92)
+# ------------------------------------------------------------
+#   on init      -> start hwservicemanager      (system/etc/init/hwservicemanager.rc)
+#   on late-init -> trigger fs, post-fs, post-fs-data, boot
+#       on post-fs -> this file: mount persist, start mobicore, keymaster-3-0,
+#                     vendor.gatekeeper-1-0        <-- runs BEFORE
+#       on boot    -> class_start default          (init.rc:76) -> recovery
+#   `trigger post-fs` (line 85) precedes `trigger boot` (line 92) and each
+#   trigger queues its actions, so this block is guaranteed to run before the
+#   recovery process starts. android.hardware.keymaster@3.0 is therefore
+#   registered with hwservicemanager before anything asks for it.
+#
+#   keystore2 itself is started on "on late-init", possibly before this block.
+#   That is fine and intentional: it needs only the manifest, which is present
+#   in the ramdisk from the first instant, and its key devices are only
+#   enumerated later, when vold asks for a security level.
+#
+# WHY mcRegistry IS SHIPPED TWICE
+# -------------------------------
+# mobicore's command line references four .drbin files under /odm/.../. Stock
+# populates that copy at runtime with "exec cp -arf /vendor/app/mcRegistry/.
+# /odm/vendor/app/mcRegistry/" (init_A.rc:86). Shipping both copies (52 files
+# each, identical) removes that ordering dependency entirely -- every -r path
+# resolves with no runtime step.
+#
+# Two of the fifteen -r names do not exist in stock's ramdisk OR on the vendor
+# partition (07407000000000000000000000000000.drbin, 0f5eed3c...efad.drbin).
+# That is safe: mcDriverDaemon's own usage string says
+#     "-r DRIVER   It could be a /path/to/secure/driver.tlbin or a UUID ..."
+#     "Driver %s missing, ignore [%s:%d]"
+# so absent drivers are skipped, not fatal. The command line is copied verbatim.
+#
+# THE OTHER HALF OF THE FIX (source, this same build)
+# ---------------------------------------------------
+#   system/security/keystore2/src/vintf/vintf.cpp
+#       All four FFI entry points now return an empty list when
+#       GetDeviceHalManifest() is null instead of dereferencing it.
+#   system/vold/Keymaster.cpp
+#       AServiceManager_waitForService() -- which blocks for ever -- replaced
+#       with a bounded 5 s AServiceManager_checkService() retry that falls
+#       through to the existing "Vold unable to connect to keystore2" error
+#       path. TWRP can no longer hang at the splash screen whatever happens
+#       to keystore2.
+
+# --- startup ----------------------------------------------------------------
+on post-fs
+    # CREATE THE "fscrypt" SESSION KEYRING (build 18)
+    # ---------------------------------------------
+    # vold's installKey() ends in installProvisioningKey() (system/vold/KeyUtil.cpp),
+    # whose first act is fscryptKeyring():
+    #     keyctl_search(KEY_SPEC_SESSION_KEYRING, "keyring", "fscrypt", 0)
+    # and it returns false if that keyring is absent.  The ONLY creator of it in the
+    # whole tree is system/core/init/fscrypt_init_extensions.cpp:49, reached only from
+    # init's do_mount_all (builtins.cpp:626/636/646) and from do_install_keyring
+    # (builtins.cpp:663, registered as "install_keyring" at builtins.cpp:1459).
+    # Recovery never runs mount_all, so on a recovery boot the keyring never existed.
+    # Observed on-device in build 17, before this line:
+    #     adb shell 'cat /proc/keys'  ->  6 keyrings (_uid.0, _uid_ses.0, _ses,
+    #                                      .builtin_trusted_keys, .fs-verity,
+    #                                      .builtin_regdb_keys) and
+    #                                      `grep -c fscrypt` = 0
+    #     /proc/keys also showed 0 "fscrypt-provisioning" keys after 4 DE attempts
+    #               -> installProvisioningKey never once succeeded
+    #     /data/system listed 84 ciphertext names and lookup of "users" /
+    #     "packages.xml" returned ENOENT, while /data/system_de (no policy) listed
+    #     plaintext -> the DE policy key was never in the filesystem keyring
+    # Normal Android does not hit this because init runs mount_all and takes the
+    # FS_MGR_MNTALL_DEV_FILE_ENCRYPTED branch.  install_keyring is the standalone
+    # builtin AOSP provides for exactly this; it is a no-op if the keyring exists
+    # (fscrypt_init_extensions.cpp:45 returns early).  It runs here, before
+    # "on boot -> class_start default" starts the recovery process (init.rc:85 vs :92).
+    install_keyring
+
+    # Trustonic TEE registry lives on the persist partition (stock init_A.rc:71-75).
+    # /dev/block/by-name/persist -> /dev/block/sdc17 verified present.
+    mkdir /mnt/vendor/persist/mcRegistry
+    mkdir /mnt/vendor/persist
+    mount ext4 /dev/block/by-name/persist /mnt/vendor/persist rw
+    # The mkdir above is shadowed by the mount; recreate it in case the
+    # partition does not carry an mcRegistry of its own.
+    mkdir /mnt/vendor/persist/mcRegistry
+
+    # TEE daemon first: android.hardware.keymaster@3.0-service reaches the
+    # Trustonic TEE through it to unwrap the FBE system-wide DE key.
+    start mobicore
+    start keymaster-3-0
+    start vendor.gatekeeper-1-0
+
+# --- services (verbatim from stock init_A.rc; class defaults to `default`) ---
+
+service keymaster-3-0 /system/bin/android.hardware.keymaster@3.0-service.trustonic
+    seclabel u:r:recovery:s0
+
+service vendor.gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+    seclabel u:r:recovery:s0
+
+service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper
+    seclabel u:r:recovery:s0
+
+service mobicore /vendor/bin/mcDriverDaemon --P1 /mnt/vendor/persist/mcRegistry \
+    -r /vendor/app/mcRegistry/020f0000000000000000000000000000.drbin \
+    -r /vendor/app/mcRegistry/05120000000000000000000000000000.drbin \
+    -r /vendor/app/mcRegistry/020b0000000000000000000000000000.drbin \
+    -r /odm/vendor/app/mcRegistry/05070000000000000000000000000000.drbin \
+    -r /odm/vendor/app/mcRegistry/030b0000000000000000000000000000.drbin \
+    -r /odm/vendor/app/mcRegistry/030c0000000000000000000000000000.drbin \
+    -r /vendor/app/mcRegistry/07060000000000000000000000007169.drbin \
+    -r /vendor/app/mcRegistry/40188311faf343488db888ad39496f9a.drbin \
+    -r /vendor/app/mcRegistry/06090000000000000000000000000000.drbin \
+    -r /vendor/app/mcRegistry/0f5eed3c3b5a47afacca69a84bf0efad.drbin \
+    -r /vendor/app/mcRegistry/07407000000000000000000000000000.drbin \
+    -r /vendor/app/mcRegistry/9073f03a9618383bb1856eb3f990babd.drbin \
+    -r /vendor/app/mcRegistry/6b3f5fa0f8cf55a7be2582587d62d63a.drbin \
+    -r /vendor/app/mcRegistry/5020170115e016302017012521300000.drbin \
+    -r /odm/vendor/app/mcRegistry/09070000000000000000000000000000.drbin
+    seclabel u:r:recovery:s0
+

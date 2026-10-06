@@ -1,0 +1,58 @@
+# system.prop — OPPO Reno Z (CPH1979)
+#
+# Every line was read out of the dump. Provenance:
+#   platform/build identity/treble/hw/crypto  -> debugfs cat /system/build.prop
+#                                                dump/system.bin
+#                                                debugfs cat /build.prop dump/vendor.bin
+#   product identity                          -> strings dump/{system,vendor}.bin
+# No value below is invented.
+
+# platform
+# ro.product.board=oppo6779 and ro.board.platform=mt6779 are deliberately NOT
+# assigned here: build/make/core/main.mk:325-326 already emits both from
+# TARGET_BOOTLOADER_BOARD_NAME / TARGET_BOARD_PLATFORM, which BoardConfig.mk
+# sets. Writing them again put a second, identical copy into
+# PRODUCT_SYSTEM_DEFAULT_PROPERTIES on the 2026-10-02 build. Stock's values
+# (ro.product.board=oppo6779, ro.board.platform=mt6779) are still what the
+# image reports; see README.md provenance table.
+ro.mediatek.platform=MT6779
+ro.vendor.mediatek.platform=MT6779
+ro.vendor.mediatek.version.branch=alps-mp-r0.mp1.tc16sp-pr2
+ro.vendor.mediatek.version.release=alps-mp-r0.mp1.tc16sp-pr2-V1.1
+
+# build identity — STOCK's values, recorded as provenance only, NOT assigned.
+# The build system generates ro.build.* itself (debugfs cat /system/build.prop
+# on dump/system.bin says RP1A.200720.011 / sdk 30 / 11 / user / release-keys;
+# this tree builds SP2A.220405.004 / sdk 32 / 12 / eng / test-keys). Assigning
+# them here makes the Android 12.1 sysprop merger abort with
+#   "error: found duplicate sysprop assignments" (build/make, building
+#   out/target/product/CPH1979/system/build.prop, first build 2026-10-02).
+# Recovery identity comes from prop.default in the ramdisk anyway.
+#   stock: ro.build.id=RP1A.200720.011  ro.build.version.sdk=30
+#          ro.build.version.release=11  ro.build.type=user
+#          ro.build.tags=release-keys
+#          ro.build.display.id=RP1A.200720.011 release-keys
+
+# product identity (note: ro.product.device is the OPPO codename, NOT the
+# marketing model; CPH1979EEA / CPH1979RU name variants also occur)
+ro.product.brand=OPPO
+ro.product.manufacturer=OPPO
+ro.product.model=CPH1979
+ro.product.name=CPH1979
+ro.product.device=OP48A1
+
+# treble — STOCK's value, recorded as provenance only, NOT assigned. The build
+# system writes ro.treble.enabled itself (this tree writes false); assigning
+# true here hit the same "duplicate sysprop assignments" abort as the block
+# above. Stock dump/system.bin has ro.treble.enabled=true, and report 08/07
+# carry that as a device fact. Recovery does not consult it.
+#   stock: ro.treble.enabled=true
+
+# hardware bits that matter to recovery
+ro.hardware.egl=meow
+ro.hardware.kmsetkey=trustonic
+
+# crypto — must match the stock fstab's fileencryption= mode
+ro.crypto.volume.filenames_mode=aes-256-cts
+ro.crypto.uses_fs_ioc_add_encryption_key=true
+ro.vendor.mtk_trustonic_tee_support=1

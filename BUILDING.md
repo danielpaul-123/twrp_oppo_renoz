@@ -1,0 +1,122 @@
+# BUILDING.md — from a clean sync to a flashable `recovery.img`
+
+The reference build environment was: Linux x86-64, OpenJDK 11, the
+`minimal-manifest-twrp` manifest at `refs/tags/android-12.1.0_r4`. Every step
+below is the one actually used to produce the released image.
+
+## 1. Prerequisites
+
+* A POSIX shell, `repo` (Google's repo tool) on `PATH`, `git`, `python3`.
+* **JDK 11** — set `JAVA_HOME` explicitly, e.g.
+  `export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64`.
+* Disk for a full TWRP/AOSP tree plus `out/` (the usual multi-hundred-GB
+  budget; the reference build ran on a workspace with room for ~7.7 GB of
+  dumps plus the tree — size your disk for the manifest, not the dump).
+* The device's **stock firmware dump** — specifically `recovery.bin`, the
+  raw read of the stock recovery partition. On this project that dump is a
+  full per-partition raw read of the device; for *this* build step only
+  `recovery.bin` is required (the extract script says so explicitly).
+
+## 2. Sync the source tree
+
+```sh
+mkdir twrp-12.1 && cd twrp-12.1
+repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
+          -b twrp-12.1
+repo sync
+```
+
+The manifest's default revision is already `refs/tags/android-12.1.0_r4`
+(revision string from `.repo/manifests/default.xml`), i.e. the exact base
+this port was developed and tested against.
+
+## 3. Drop in this repo
+
+```sh
+git clone <this-repository-url> twrp_oppo_renoz
+# device tree:
+cp -a twrp_oppo_renoz/device .
+```
+
+This gives you `device/oppo/CPH1979/`.
+
+## 4. Apply the patches
+
+From the manifest root (see `patches/README.md` for the table of which patch
+touches which repo, and its base commit):
+
+```sh
+REPO=$PWD/twrp_oppo_renoz
+git -C bootable/recovery   apply "$REPO/patches/01-bootable_recovery.patch"
+git -C system/vold         apply "$REPO/patches/02-system_vold.patch"
+git -C system/security     apply "$REPO/patches/03-system_security_keystore2.patch"
+git -C hardware/interfaces apply "$REPO/patches/04-hardware_interfaces_keymaster.patch"
+git -C build/make          apply "$REPO/patches/05-build_make_identity.patch"
+git -C system/core         apply "$REPO/patches/06-system_core_recovery_available.patch"
+git -C system/extras       apply "$REPO/patches/07-system_extras_recovery_available.patch"
+```
+
+Each applied repository's `git diff` must then be byte-identical to the
+patch file itself — that is the acceptance check in `patches/README.md`, and
+it is how the released patches were verified.
+
+## 5. Extract the proprietary ramdisk files
+
+```sh
+bash device/oppo/CPH1979/extract-blobs.sh /path/to/your/dump
+```
+
+This reads your stock `recovery.bin` (gzip ramdisk at byte offset 13998080,
+size 30430430 — Android boot header v2, page_size 2048), copies the 119
+files listed in `proprietary-files.txt` into `recovery/root/`, recreates the
+4 symlinks in `symlinks.txt`, and **fails unless all 119 md5s match**
+`blobs.md5`. Nothing is downloaded; nothing except your own dump is touched.
+
+(The two ELFs under `recovery/root/system/lib64/` that are *not* extracted
+are committed to git — they are built from this source tree, see
+`CHANGES.md` §8.)
+
+## 6. Build
+
+```sh
+source build/envsetup.sh
+lunch twrp_CPH1979-eng
+mka -j16 recoveryimage      # -j to taste; the reference build used -j16
+```
+
+Output: `out/target/product/CPH1979/recovery.img`.
+
+The reference build's script also ran an image-acceptance check (header,
+segments, AVB footer compared field-by-field against the stock recovery
+header) before flashing; the released image passed it. That check lives in
+the project's private acceptance tooling and is not part of this repo, but
+the practical smoke test for your own build is in `INSTALLING.md`.
+
+## 7. Expected output
+
+* Header v2, page_size 2048; kernel and dtbo segments laid out as described
+  in `device/oppo/CPH1979/README.md`.
+* Signed with the AOSP test key (this device's bootloader accepts it —
+  see `BoardConfig.mk`'s AVB notes).
+
+**Byte-reproducibility:** the released image's md5 is
+`848677614a9f8c40ee87e720b3ec07fe`. A rebuild from the same tree may differ
+bytewise (toolchain/build timestamps in the ramdisk), so compare your
+rebuild's *behaviour* and header fields, not necessarily its md5. If your
+rebuild of the *exact* released tree does not reproduce that md5, that is a
+known open question, not a failure of your build — see `CHANGES.md` for what
+"build 26" pins down.
+
+## Troubleshooting
+
+* **`git apply` fails** — you are not at the base commit listed in
+  `patches/README.md`; check it out first (`git -C <repo> rev-parse HEAD`).
+* **extract script: "no gzip magic at offset 13998080"** — your
+  `recovery.bin` is not this device's stock recovery image (wrong file, or
+  a different build).
+* **extract script: md5 mismatch** — your stock firmware differs from the
+  build this port was developed against (`1654583371623`). The script
+  intentionally refuses to continue; see README's "Other stock builds"
+  status row.
+* **`lunch` doesn't offer `twrp_CPH1979`** — the device tree copy step
+  (§3) didn't land in `device/oppo/CPH1979/`.

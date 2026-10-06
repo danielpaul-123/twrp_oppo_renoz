@@ -1,0 +1,17 @@
+# Proprietary ramdisk files kept out of git — provided by extract-blobs.sh
+# from the device's own stock firmware (see proprietary-files.txt).
+# The prebuilt kernel / dtbo / dtb are intentionally NOT excluded: they are
+# unmodified stock components required for the build (see README.md).
+recovery/root/odm/
+recovery/root/vendor/bin/
+recovery/root/vendor/lib64/
+recovery/root/vendor/app/
+recovery/root/system/bin/
+# system/lib64: keep the two AOSP-built libs (built from
+# hardware/interfaces/keymaster/3.0/default in this source tree,
+# Apache-2.0), extract the dump-derived ones.
+recovery/root/system/lib64/*
+!recovery/root/system/lib64/libkeymaster3device.so
+!recovery/root/system/lib64/hw/
+recovery/root/system/lib64/hw/*
+!recovery/root/system/lib64/hw/android.hardware.keymaster@3.0-impl.so
