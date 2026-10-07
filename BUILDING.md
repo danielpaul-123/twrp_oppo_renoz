@@ -10,9 +10,12 @@ below is the one actually used to produce the released image.
 * **JDK 11** — set `JAVA_HOME` explicitly, e.g.
   `export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64`.
 * Disk for a full TWRP/AOSP tree plus `out/`: the reference workspace
-  measured **~44 GB** total (`.repo` 8 GB + checked-out sources 25 GB +
-  `out/` 11 GB) — keep ≥ 60 GB free. (The dump itself is separate: the
-  extract step only needs its `recovery.bin`.)
+  (synced as in §2, with `--depth=1`) measured **~44 GB** total
+  (`.repo` 8 GB + checked-out sources 25 GB + `out/` 11 GB) — keep
+  ≥ 60 GB free. A full-history sync (without `--depth=1`) produces
+  byte-identical checkouts but a much larger `.repo` — measured past
+  47 GB mid-sync — so allow ≥ 90 GB free for that variant. (The dump
+  itself is separate: the extract step only needs its `recovery.bin`.)
 * The device's **stock firmware dump** — specifically `recovery.bin`, the
   raw read of the stock recovery partition. On this project that dump is a
   full per-partition raw read of the device; for *this* build step only
@@ -22,14 +25,19 @@ below is the one actually used to produce the released image.
 
 ```sh
 mkdir twrp-12.1 && cd twrp-12.1
-repo init -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
+repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
           -b twrp-12.1
 repo sync
 ```
 
 The manifest's default revision is already `refs/tags/android-12.1.0_r4`
 (revision string from `.repo/manifests/default.xml`), i.e. the exact base
-this port was developed and tested against.
+this port was developed and tested against. `--depth=1` fetches only that
+tag snapshot per project: the reference workspace and the released image
+were built from exactly this (all 218 projects shallow, `.repo` 8 GB), and
+the patch series was verified against such clones. Omitting `--depth=1`
+fetches full history — same checkouts, same result, but a much larger
+`.repo` (see §1).
 
 ## 3. Clone this repo into the tree
 
