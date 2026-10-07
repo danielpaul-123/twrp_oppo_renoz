@@ -31,15 +31,17 @@ The manifest's default revision is already `refs/tags/android-12.1.0_r4`
 (revision string from `.repo/manifests/default.xml`), i.e. the exact base
 this port was developed and tested against.
 
-## 3. Drop in this repo
+## 3. Clone this repo into the tree
+
+This repository **is** the device tree (TWRP convention: `BoardConfig.mk` &
+friends at the repository root). Clone it to its Android-tree location,
+exactly like a TeamWin device tree:
 
 ```sh
-git clone <this-repository-url> twrp_oppo_renoz
-# device tree:
-cp -a twrp_oppo_renoz/device .
+git clone <this-repository-url> device/oppo/CPH1979
 ```
 
-This gives you `device/oppo/CPH1979/`.
+This gives you `device/oppo/CPH1979/` in place.
 
 ## 4. Apply the patches
 
@@ -47,7 +49,7 @@ From the manifest root (see `patches/README.md` for the table of which patch
 touches which repo, and its base commit):
 
 ```sh
-REPO=$PWD/twrp_oppo_renoz
+REPO=$PWD/device/oppo/CPH1979       # the clone from §3
 git -C bootable/recovery   apply "$REPO/patches/01-bootable_recovery.patch"
 git -C system/vold         apply "$REPO/patches/02-system_vold.patch"
 git -C system/security     apply "$REPO/patches/03-system_security_keystore2.patch"
@@ -96,7 +98,7 @@ the practical smoke test for your own build is in `INSTALLING.md`.
 ## 7. Expected output
 
 * Header v2, page_size 2048; kernel and dtbo segments laid out as described
-  in `device/oppo/CPH1979/README.md`.
+  in `device/oppo/CPH1979/DEVICE.md`.
 * Signed with the AOSP test key (this device's bootloader accepts it —
   see `BoardConfig.mk`'s AVB notes).
 
@@ -119,5 +121,5 @@ known open question, not a failure of your build — see `CHANGES.md` for what
   build this port was developed against (`1654583371623`). The script
   intentionally refuses to continue; see README's "Other stock builds"
   status row.
-* **`lunch` doesn't offer `twrp_CPH1979`** — the device tree copy step
+* **`lunch` doesn't offer `twrp_CPH1979`** — the clone step
   (§3) didn't land in `device/oppo/CPH1979/`.

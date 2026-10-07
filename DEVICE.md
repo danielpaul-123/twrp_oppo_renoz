@@ -1,5 +1,10 @@
 # device/oppo/CPH1979 — OPPO Reno Z (CPH1979), MT6779 / board `oppo6779`
 
+*This file documents the device tree this repository ships; `device/oppo/CPH1979`
+is where it lives in a synced Android tree. References to `report NN`,
+`FINDINGS.md` or `analysis/…` below are to the author's private working notes,
+which are not included here.*
+
 A recovery device tree **authored from the firmware dump**, not ported.
 
 ## Why this exists

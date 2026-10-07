@@ -46,9 +46,10 @@ restart — that path is tested.)
 Everything, with per-hunk reasoning and build attribution: **[CHANGES.md](CHANGES.md)**.
 In short:
 
-1. **Device tree** — `device/oppo/CPH1979/`, authored from the firmware
-   dump; every value traced to a byte offset in its
-   [README](device/oppo/CPH1979/README.md).
+1. **Device tree** — this repository *is* the tree (TWRP convention: clone
+   it into `device/oppo/CPH1979` of a synced source tree), authored from
+   the firmware dump; every value traced to a byte offset in
+   [DEVICE.md](DEVICE.md).
 2. **FBE decrypt chain** — vold/keystore2/keymaster changes so the legacy
    keystore store, the Trustonic keymaster 3.0 stack and the Android-11
    identity pins line up (patches 02–05).
@@ -81,17 +82,22 @@ phone uses.
 
 ## Building it yourself
 
-See **[BUILDING.md](BUILDING.md)**: sync the `twrp-12.1` manifest, drop in
-this repo's device tree, apply the 7 patches, run `extract-blobs.sh` against
-your own stock firmware dump, `lunch twrp_CPH1979-eng && mka recoveryimage`.
+See **[BUILDING.md](BUILDING.md)**: sync the `twrp-12.1` manifest, clone this
+repo into `device/oppo/CPH1979`, apply the 7 patches, run `extract-blobs.sh`
+against your own stock firmware dump, `lunch twrp_CPH1979-eng && mka recoveryimage`.
 
 ## Repository contents
 
+This repository **is** the device tree (TWRP layout — clone it straight into
+`device/oppo/CPH1979` of a synced source tree), plus the patch series and docs.
+
 | path | what it is |
 |---|---|
-| `device/oppo/CPH1979/` | the device tree (boot header layout, fstab, `system.prop`, prebuilt stock kernel/dtbo/dtb) |
-| `device/oppo/CPH1979/extract-blobs.sh` | pulls the 119 proprietary ramdisk files from **your** stock `recovery.bin` and md5-verifies them |
+| `BoardConfig.mk`, `twrp_CPH1979.mk`, `device.mk`, `Android*.mk`, `recovery.fstab`, `system.prop`, `vendorsetup.sh` | the device tree (boot header layout, fstab, identity pins) |
+| `prebuilt/`, `recovery/root/` | stock kernel/dtbo/dtb; ramdisk overlay (init rc, vintf, the two tree-built ELFs) |
+| `extract-blobs.sh` + `proprietary-files.txt` / `blobs.md5` / `symlinks.txt` | pulls the 119 proprietary ramdisk files from **your** stock `recovery.bin` and md5-verifies them |
 | `patches/` | the complete source delta vs stock TWRP |
+| `DEVICE.md` | device-tree provenance: every value traced to a byte offset in the firmware dump |
 | `CHANGES.md` | every change, classified and attributed |
 | `BUILDING.md` / `INSTALLING.md` | build & flash instructions |
 | `LICENSE` | GPL-3.0-or-later (TWRP's license; see License below) |

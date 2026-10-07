@@ -26,7 +26,7 @@ This file is the complete, per-hunk inventory of that work. Build numbers
 | `build/make` | 1 | +18 / −2 | stock platform identity |
 | `system/core` | 1 | +4 / −0 | `recovery_available` |
 | `system/extras` | 1 | +3 / −0 | `recovery_available` |
-| `device/oppo/CPH1979` | *new tree* | — | device adaptation (see its README for per-value provenance) |
+| `device/oppo/CPH1979` | *new tree* | — | device adaptation (see [`DEVICE.md`](DEVICE.md) for per-value provenance) |
 
 Categories used below: **[fix]** = correctness/functional change,
 **[device]** = device adaptation, **[probe]** = diagnostics-only (kept
@@ -259,7 +259,7 @@ recovery).
 ## 8. `device/oppo/CPH1979` — the device tree (new)
 
 Full per-value provenance is in
-[`device/oppo/CPH1979/README.md`](device/oppo/CPH1979/README.md) (every
+[`DEVICE.md`](DEVICE.md) (every
 BoardConfig value traced to the boot header / `build.prop` of the stock
 images). Highlights:
 
