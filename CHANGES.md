@@ -12,8 +12,16 @@ pins.
 This file is the complete, per-hunk inventory of that work. Build numbers
 (`build N`) refer to the bring-up sequence this tree was developed in; each
 `N`'s rationale is preserved verbatim in the build script that carried it
-(archived with the project evidence). The final image — build 26 — is
-`848677614a9f8c40ee87e720b3ec07fe`.
+(archived with the project evidence). The current image — build 27 — is
+`3f0988438999e42623d761f4e326015c`.
+
+Build 27 changes **no source**: it is build 26 rebuilt with `BUILD_DATETIME`
+pinned to `1791199381` and a complete `recovery/root` restage. The pin exists
+because build 26 was stamped from two live clocks 16 s apart inside one build,
+which left its `prop.default` mixing `…165317` and `…165301` — irreproducible
+by construction. Its only content deltas from 26 are the three files the pin
+and restage necessarily touch: `prop.default`, `system/lib64/libtar.so`, and
+`ramdisk-files.sha256sum` (plus the `ramdisk_size` that follows from them).
 
 ## Size of the delta
 
@@ -298,8 +306,25 @@ images). Highlights:
 | diagnostics (kept on purpose) | ~140 | sections 1.9, 2.3, 2.5, 3.3–3.4, 4.1 |
 | device adaptation | new tree | section 8 |
 
-Every fix above is verified live on the device (build 26, md5
-`848677614a9f8c40ee87e720b3ec07fe`): FBE DE+CE decrypt with the user's own
-PIN, `adb sideload`, and the two build-26 regression tests (Install TWRP App
+Every fix above is verified live on the device (build 27, md5
+`3f0988438999e42623d761f4e326015c`): FBE DE+CE decrypt with the user's own
+PIN, `adb sideload`, and the two regression tests (Install TWRP App
 without crash; decrypt still working after a forced within-boot recovery
 restart).
+
+Build 27 re-passed the decrypt tests after flashing (fresh boot + a deliberate
+`kill -11` with init respawn; the migrated keystore row survived, same
+`nspace` on both instances). The Install-TWRP-App tap was not re-run on 27 —
+it remains verified on build 26 — because no CLI verb reaches that page and
+synthesising touches was declined rather than risk a mis-mapped tap on a
+screen carrying *Wipe* / *Format Data*.
+
+A separate reproducibility gate confirms these published artefacts are
+sufficient to rebuild that image: an independently synced tree (all 249
+manifest projects at identical SHAs), this repo's device tree at the tagged
+commit, the 7 patches byte-identical modulo index-hash width, and 119 blobs
+matching a pinned manifest produced a `recovery.img` whose kernel segment,
+3707-entry ramdisk (content/mode/type), all boot header fields and AVB footer
+fields are identical. Exact md5 differs only by cpio mtimes and the AVB PSS
+salt, both non-deterministic by design. All ten attempt logs — nine failures
+and aborts and the one pass — are preserved in the project evidence.
