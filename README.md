@@ -114,8 +114,14 @@ This repository **is** the device tree (TWRP layout — clone it straight into
 * This repository contains **no device-unique data**: no serial numbers, no
   keys, no RPMB/nvram material, no personal data. The committed prebuilts
   (kernel, dtbo, dtb) are model-firmware components — identical across all
-  units running that build — and the 119 extracted TEE/gatekeeper files are
-  pulled by *you* from *your* firmware, never shipped.
+  units running that build.
+* The 119 extracted TEE/gatekeeper files are **not in the source tree**:
+  `extract-blobs.sh` pulls them from *your* firmware and md5-verifies them
+  against `blobs.md5`. They are part of the device's firmware, not
+  device-unique material — a scan of the built image confirms it carries no
+  serial, key, HRID, MEID or IMEI. The built `recovery.img`, including the
+  published release asset, necessarily **does** contain them, as any
+  bootable recovery for this device must; see *License* below.
 * The device tree was authored from a raw dump of the author's unit; the
   dump itself is not redistributed here.
 * Layout conventions were borrowed from the public OrangeFox device tree
