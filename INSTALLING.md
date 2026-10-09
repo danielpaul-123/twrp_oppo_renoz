@@ -32,10 +32,16 @@
 
    ```sh
    md5sum recovery.img
-   # 848677614a9f8c40ee87e720b3ec07fe  recovery.img
+   # 3f0988438999e42623d761f4e326015c  recovery.img
    ```
 
-   If the md5 differs, stop — you have the wrong file (or it was altered).
+   This identifies the **published** image. If you built the recovery
+   yourself, yours will not match — exact md5 is not reproducible (ramdisk
+   cpio mtimes, and the AVB signature salt is randomized per build), so a
+   mismatch here is only meaningful for a downloaded copy. Verify a
+   self-build by content instead; see `BUILDING.md`'s
+   "Byte-reproducibility" section. If a *downloaded* copy's md5 differs,
+   stop — you have the wrong file (or it was altered).
 
 3. **Back up your stock recovery** by any means you already trust (root
    `dd`, firmware files you keep). Flashing replaces it. Restoring it is

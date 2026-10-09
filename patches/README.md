@@ -3,11 +3,16 @@
 Seven patches, one per upstream repository. Together they are the **entire**
 difference between stock TWRP (`minimal-manifest-twrp` `twrp-12.1`, manifest
 pinned to `refs/tags/android-12.1.0_r4`) and the tree that produced the
-flashed image `848677614a9f8c40ee87e720b3ec07fe` (build 26). Nothing else in
+flashed image `3f0988438999e42623d761f4e326015c` (build 27). Nothing else in
 the source tree is modified.
 
 Each patch was exported with `git diff` from the working tree that built
-build 26, so it applies to the same base it was made from.
+build 26, so it applies to the same base it was made from. Build 27 carries
+**the same seven patches, unchanged** — it is build 26 rebuilt with
+`BUILD_DATETIME` pinned and a complete `recovery/root` restage, so no source
+delta exists between the two. The Gate 4 reproducibility check confirms these
+patches are byte-identical (modulo index-hash width) to the applied tree that
+rebuilt the published image.
 
 | patch | applies in | base commit | what it carries |
 |---|---|---|---|

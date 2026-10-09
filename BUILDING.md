@@ -110,13 +110,22 @@ the practical smoke test for your own build is in `INSTALLING.md`.
 * Signed with the AOSP test key (this device's bootloader accepts it —
   see `BoardConfig.mk`'s AVB notes).
 
-**Byte-reproducibility:** the released image's md5 is
-`848677614a9f8c40ee87e720b3ec07fe`. A rebuild from the same tree may differ
-bytewise (toolchain/build timestamps in the ramdisk), so compare your
-rebuild's *behaviour* and header fields, not necessarily its md5. If your
-rebuild of the *exact* released tree does not reproduce that md5, that is a
-known open question, not a failure of your build — see `CHANGES.md` for what
-"build 26" pins down.
+**Byte-reproducibility:** the published image's md5 is
+`3f0988438999e42623d761f4e326015c`. **A rebuild from the same tree will not
+reproduce that md5**, and that is expected, not a failure of your build. Two
+causes, both measured on this project:
+
+* the ramdisk's cpio headers embed file mtimes, which track the build clock;
+* AVB signs with RSA-PSS, whose salt is randomized on every signing run, so
+  the 256-byte signature and the vbmeta digest differ each time.
+
+What *is* stable, and what the reproducibility gate for this tree actually
+compares, is content: the kernel segment (sha256), every ramdisk entry's path
++ mode + type + bytes, all boot header fields, and the AVB footer's
+`original_image_size` / vbmeta offset / size. Those match the published image
+exactly. Only the exact md5 is expected to drift — see `CHANGES.md` for what
+"build 27" pins down (`BUILD_DATETIME=1791199381`, a single clock, where
+build 26 was stamped from two 16 s apart).
 
 ## Troubleshooting
 

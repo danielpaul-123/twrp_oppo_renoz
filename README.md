@@ -14,7 +14,7 @@ theoretically.
 | Device | OPPO Reno Z, model **CPH1979**, board `oppo6779`, SoC MT6779 (Helio P90) |
 | Base | TWRP `twrp-12.1` @ `android-12.1.0_r4` (manifest `minimal-manifest-twrp`) |
 | Verified against | stock Android 11, build `1654583371623`, security patch 2022-06-05 |
-| Release image | `recovery.img` — **md5 `848677614a9f8c40ee87e720b3ec07fe`** (build 26) |
+| Release image | `recovery.img` — **md5 `3f0988438999e42623d761f4e326015c`** (build 27) |
 | Partition scheme | **A-only**, fixed-size partitions, non-dynamic (`no super`) |
 
 ## Status — what is proven, and what is not
@@ -71,11 +71,18 @@ See **[INSTALLING.md](INSTALLING.md)** for the full instructions, warnings
 and verification steps. The core:
 
 ```sh
-md5sum recovery.img          # must be 848677614a9f8c40ee87e720b3ec07fe
+md5sum recovery.img          # downloaded asset: 3f0988438999e42623d761f4e326015c
 adb reboot bootloader        # wait for fastboot to enumerate
 fastboot flash recovery recovery.img
 fastboot reboot recovery
 ```
+
+That md5 identifies the **published** image. If you built the recovery
+yourself, your build will not match it — exact md5 is not reproducible (ramdisk
+cpio mtimes, and the AVB signature salt is randomized per build). Verify a
+self-build by content instead: kernel segment, ramdisk entries, boot header
+fields and the AVB footer, all of which *are* stable. See `BUILDING.md`'s
+"Byte-reproducibility" section.
 
 Then enter your lock-screen PIN at the password prompt — the same PIN the
 phone uses.
