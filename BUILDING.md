@@ -111,7 +111,7 @@ the practical smoke test for your own build is in `INSTALLING.md`.
   see `BoardConfig.mk`'s AVB notes).
 
 **Byte-reproducibility:** the published image's md5 is
-`3f0988438999e42623d761f4e326015c`. **A rebuild from the same tree will not
+`f495d431ba634f329fa06420f6e3b25f`. **A rebuild from the same tree will not
 reproduce that md5**, and that is expected, not a failure of your build. Two
 causes, both measured on this project:
 
@@ -125,7 +125,10 @@ compares, is content: the kernel segment (sha256), every ramdisk entry's path
 `original_image_size` / vbmeta offset / size. Those match the published image
 exactly. Only the exact md5 is expected to drift — see `CHANGES.md` for what
 "build 27" pins down (`BUILD_DATETIME=1791199381`, a single clock, where
-build 26 was stamped from two 16 s apart).
+build 26 was stamped from two 16 s apart). Build 28 carries that same pin;
+its md5 differs from build 27's only because of the one source hunk it adds
+(the android-base `InitLogging` fix) plus the same two per-build causes
+below.
 
 ## Troubleshooting
 

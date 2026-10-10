@@ -457,10 +457,18 @@ index 1a404c6..dec1f33 100644
  	}
  
 diff --git a/twrp.cpp b/twrp.cpp
-index eedc581..8f07ec4 100644
+index eedc581..bf4a0b1 100644
 --- a/twrp.cpp
 +++ b/twrp.cpp
-@@ -275,6 +275,7 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
+@@ -54,6 +54,7 @@ extern "C" {
+ #else
+ #include <base/strings.h>
+ #endif
++#include <android-base/logging.h>
+ #include "openrecoveryscript.hpp"
+ #include "variables.h"
+ #include "startupArgs.hpp"
+@@ -275,6 +276,7 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
  	// Check if system has never been changed
  	TWPartition* sys = PartitionManager.Find_Partition_By_Path(PartitionManager.Get_Android_Root_Path());
  	TWPartition* ven = PartitionManager.Find_Partition_By_Path("/vendor");
@@ -468,7 +476,7 @@ index eedc581..8f07ec4 100644
  	if (sys) {
  		if (sys->Get_Super_Status()) {
  #ifdef TW_INCLUDE_CRYPTO
-@@ -295,16 +296,24 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
+@@ -295,16 +297,24 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
  						LOGERR("Failed to start system_readonly GUI page.\n");
  					}
  				} else if (DataManager::GetIntValue("tw_mount_system_ro") == 0) {
@@ -499,3 +507,18 @@ index eedc581..8f07ec4 100644
  			}
  		}
  	}
+@@ -353,6 +363,14 @@ int main(int argc, char **argv) {
+ 	freopen(TMP_LOG_FILE, "a", stderr);
+ 	setbuf(stderr, NULL);
+ 
++	// Point android-base LOG()/PLOG() at stderr, which the freopen immediately
++	// above already redirected to /tmp/recovery.log. Without this call Logger()
++	// keeps its __ANDROID__ default LogdLogger() (system/libbase/logging.cpp:191),
++	// which writes to /dev/socket/logd -- absent in recovery -- so every LOG()
++	// and PLOG() line was silently discarded, including the errno that vold
++	// records for a failed writeStringToFile. P11.10 items 3 and 2.
++	android::base::InitLogging(argv, &android::base::StderrLogger);
++
+ 	signal(SIGPIPE, SIG_IGN);
+ 
+ 	// Handle ADB sideload

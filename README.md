@@ -14,7 +14,7 @@ theoretically.
 | Device | OPPO Reno Z, model **CPH1979**, board `oppo6779`, SoC MT6779 (Helio P90) |
 | Base | TWRP `twrp-12.1` @ `android-12.1.0_r4` (manifest `minimal-manifest-twrp`) |
 | Verified against | stock Android 11, build `1654583371623`, security patch 2022-06-05 |
-| Release image | `recovery.img` — **md5 `3f0988438999e42623d761f4e326015c`** (build 27) |
+| Release image | `recovery.img` — **md5 `f495d431ba634f329fa06420f6e3b25f`** (build 28; supersedes build 27 `3f098843…`, which stays tagged as `build27`) |
 | Partition scheme | **A-only**, fixed-size partitions, non-dynamic (`no super`) |
 
 ## Status — what is proven, and what is not
@@ -71,7 +71,7 @@ See **[INSTALLING.md](INSTALLING.md)** for the full instructions, warnings
 and verification steps. The core:
 
 ```sh
-md5sum recovery.img          # downloaded asset: 3f0988438999e42623d761f4e326015c
+md5sum recovery.img          # downloaded asset: f495d431ba634f329fa06420f6e3b25f
 adb reboot bootloader        # wait for fastboot to enumerate
 fastboot flash recovery recovery.img
 fastboot reboot recovery

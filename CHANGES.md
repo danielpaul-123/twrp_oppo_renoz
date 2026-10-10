@@ -12,8 +12,8 @@ pins.
 This file is the complete, per-hunk inventory of that work. Build numbers
 (`build N`) refer to the bring-up sequence this tree was developed in; each
 `N`'s rationale is preserved verbatim in the build script that carried it
-(archived with the project evidence). The current image — build 27 — is
-`3f0988438999e42623d761f4e326015c`.
+(archived with the project evidence). The current image — build 28 — is
+`f495d431ba634f329fa06420f6e3b25f`.
 
 Build 27 changes **no source**: it is build 26 rebuilt with `BUILD_DATETIME`
 pinned to `1791199381` and a complete `recovery/root` restage. The pin exists
@@ -23,11 +23,16 @@ by construction. Its only content deltas from 26 are the three files the pin
 and restage necessarily touch: `prop.default`, `system/lib64/libtar.so`, and
 `ramdisk-files.sha256sum` (plus the `ramdisk_size` that follows from them).
 
+Build 28 changes **exactly one thing in source** — section 1.10 below. It
+carries the same `BUILD_DATETIME` pin as build 27, so its md5 differs from
+build 27's only through that hunk and the two per-build non-determinism
+causes listed in `BUILDING.md`.
+
 ## Size of the delta
 
 | repository | files | changed | character |
 |---|---:|---|---|
-| `bootable/recovery` | 8 | +297 / −14 | mount lifecycle, two crash/correctness fixes, build-relink fixes |
+| `bootable/recovery` | 8 | +306 / −14 | mount lifecycle, two crash/correctness fixes, build-relink fixes, logging init |
 | `system/vold` | 5 | +367 / −27 | FBE decrypt chain, two bug fixes, probes |
 | `system/security` (keystore2) | 5 | +101 / −4 | CE unwrap migrator arm, null-manifest guard, probes |
 | `hardware/interfaces` | 2 | +30 / −2 | probes + `recovery_available` |
@@ -126,6 +131,84 @@ Check `is_open()` on both streams and fail loudly; upstream only checked
 keystore2 aborts were invisible in recovery (no logd, no tombstoned, no
 console). `stdio_to_kmsg` routes its stderr into kmsg where dmesg can read
 it. Behaviour-neutral: only where the bytes go changes.
+
+### 1.10 `twrp.cpp` — android-base `InitLogging` — **[fix] build 28**
+
+**What was wrong.** TWRP's `main()` lives in `twrp.cpp` (`Android.mk:58`),
+which displaced upstream's `recovery_main.cpp`. Upstream calls
+`android::base::InitLogging(argv, &UiLogger)` there
+(`recovery_main.cpp:322`); the replacement dropped that call, and nothing
+else in the recovery binary makes it — `recovery_main.cpp` is referenced by
+**no build file**, so it is never compiled. `Logger()` therefore keeps its
+`__ANDROID__` default, `LogdLogger()`
+(`system/libbase/logging.cpp:191`), which writes to `/dev/socket/logd`.
+Recovery starts no logd: the socket does not exist, so every `LOG()` /
+`PLOG()` line from every library linked into the recovery binary was
+silently discarded — vold, fs_mgr, keyutil, keymaster, BoringSSL's ARM
+assembler, libbase itself. Every *other* entry point in this tree sets it
+(`updater`, `updater_main`, `update_verifier`, `minadbd`, `applypatch`),
+so the recovery binary was the one that had lost it.
+
+This was not a hypothetical cost. The `EROFS` errno vold records for a failed
+`writeStringToFile` — the answer to the project's P11.10 item 2 — was
+invisible for the entire investigation, along with
+`KeyStorage key mkdir … File exists` and a VINTF manifest-race warning.
+
+**The change.** `#include <android-base/logging.h>`, and
+`android::base::InitLogging(argv, &android::base::StderrLogger)` placed
+immediately after the `freopen`/`setbuf` block that already redirects
+`stderr` to `/tmp/recovery.log`. `nm` shows `U InitLogging(…)` and
+`U StderrLogger(…)` in both `twrp.o` and the linked recovery binary.
+
+**Scope, stated plainly.** This changes *where log bytes go and nothing
+else*. It is **not** a behavioural fix: recovery's actions are identical
+before and after (see the regression check below). What it repairs is a
+misconfigured logger whose failure mode was to discard real error records,
+which is why it is classed **[fix]** rather than **[probe]** — the defect is
+the configuration, the benefit happens to be diagnostic.
+
+**Measured, build 27 vs build 28**, in `/tmp/recovery.log`
+(`gate4-state/opencode-20261010/item2_test/recovery28.log`, 1564 lines):
+
+| | build 27 | build 28 |
+|---|---|---|
+| `StderrLogger` output lines | **0** | **105** |
+| — of which carry `file:line]` | 0 | 93 |
+| — of which `file == nullptr` prefix | 0 | 12 |
+| `Retrieving key from keymaster` (`KeyStorage.cpp:629` `LOG(INFO)`) | 0 | 6 |
+| `Key exists, using` (`KeyUtil.cpp:468` `LOG(INFO)`) | 0 | 3 |
+
+Tag breakdown of all 105: `recovery` 93, `ArmToArm64Assembler` 8, `ashmem` 2,
+`ProcessState` 1, `HidlServiceManagement` 1. The 93/12 split is
+source-explained, not incidental: `StderrOutputGenerator`
+(`system/libbase/logging_splitters.h:159-165`) emits `file:line]` only when
+`file != nullptr`, so `LOG()`-origin lines carry it and the
+`__android_log_*`-bridge lines (plus messages containing newlines, which get
+the prefix re-emitted per line at `:172`) do not.
+
+`Version mismatch` (`KeyStorage.cpp:639` `LOG(ERROR)`) stays **0 in both
+builds — that is a path which never fires on this device, not a logging
+failure**; other `LOG(ERROR)` lines do appear, so the channel is demonstrably
+open.
+
+**Regression check (hardware, build 27 vs 28).** `InitLogging` also installs
+an aborter, so build 28 was compared end-to-end against build 27: `User 0
+Decrypted Successfully`, the page sequence
+(`decrypt_pin → decrypt → trydecrypt → main → clear_vars → main2`),
+`Unable to mount` ×3, TWRP's own `^E:` lines ×0, `F`-severity lines ×0, and
+`Fatal signal`/`SIGSEGV` ×0 were all **identical**. The only structural
+difference was that build 27 needed two `trydecrypt` cycles and build 28 one
+— the PIN being typed once vs twice, not a code change.
+
+**Verification of the two strings an earlier build script called
+provably invisible:** `gate4-state/…/phase4/build15.sh:23` named three
+`LOG()` strings it concluded it could never see. Two now appear
+(`Retrieving key from keymaster` 0→6, `Key exists, using` 0→3); the third
+(`Version mismatch`) never fires. The same script also attributed part of
+the silence to *"UiLogger sends severity ≥ ERROR to `ui->Print`"*. **That
+half is wrong**: `UiLogger` lives in `recovery_main.cpp`, which no build file
+references, so it never executes. The `LogdLogger` default was the sole
+cause.
 
 ---
 
@@ -302,12 +385,13 @@ images). Highlights:
 |---|---:|---|
 | functional fixes (decrypt chain) | ~350 | sections 2.1–2.6, 3.1–3.2, 5 |
 | functional fixes (mounts / crashes) | ~150 | sections 1.1–1.7 |
+| logging channel fix (diagnostic benefit) | ~9 | section 1.10 |
 | build infrastructure | ~110 | sections 1.8, 4.2, 6, 7 |
 | diagnostics (kept on purpose) | ~140 | sections 1.9, 2.3, 2.5, 3.3–3.4, 4.1 |
 | device adaptation | new tree | section 8 |
 
-Every fix above is verified live on the device (build 27, md5
-`3f0988438999e42623d761f4e326015c`): FBE DE+CE decrypt with the user's own
+Everything except section 1.10 was verified live on the device as of build 27
+(md5 `3f0988438999e42623d761f4e326015c`): FBE DE+CE decrypt with the user's own
 PIN, `adb sideload`, and the two regression tests (Install TWRP App
 without crash; decrypt still working after a forced within-boot recovery
 restart).
@@ -319,8 +403,22 @@ it remains verified on build 26 — because no CLI verb reaches that page and
 synthesising touches was declined rather than risk a mis-mapped tap on a
 screen carrying *Wipe* / *Format Data*.
 
+Build 28 carries section 1.10 and nothing else. It was verified on hardware
+two ways: the fix itself (105 `StderrLogger` lines where build 27 had 0, and
+the `EROFS` line that answers P11.10 item 2 now visible at
+`Utils.cpp:1419`), and a regression comparison against build 27 across decrypt
+completion, the full page sequence, `Unable to mount` count, TWRP error lines
+and fatals — all identical (§1.10). The Install-TWRP-App tap and the
+within-boot restart test were **not** re-run on 28; they remain as recorded
+above for builds 26 and 27. Build 28 was also **not** put through the
+independent full-tree rebuild gate — it was built incrementally from the
+build-27 tree with four guards re-applied (`gate4-state/opencode-20261010/
+build28.sh`, `GATE28-RESULT: PASS`). Reproducibility of build 28 from the
+published patches is therefore claimed at the content level of its single
+source hunk, not at whole-image level.
+
 A separate reproducibility gate confirms these published artefacts are
-sufficient to rebuild that image: an independently synced tree (all 249
+sufficient to rebuild **build 27**: an independently synced tree (all 249
 manifest projects at identical SHAs), this repo's device tree at the tagged
 commit, the 7 patches byte-identical modulo index-hash width, and 119 blobs
 matching a pinned manifest produced a `recovery.img` whose kernel segment,

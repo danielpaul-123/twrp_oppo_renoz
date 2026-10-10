@@ -32,7 +32,7 @@
 
    ```sh
    md5sum recovery.img
-   # 3f0988438999e42623d761f4e326015c  recovery.img
+   # f495d431ba634f329fa06420f6e3b25f  recovery.img
    ```
 
    This identifies the **published** image. If you built the recovery
